@@ -15,6 +15,7 @@ in the backtest rather than quietly biasing the early results.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from aurion.data.types import OHLC, Bar
 
@@ -96,3 +97,42 @@ def prices_equal(a: float, b: float, point: float) -> bool:
 def round_to_point(price: float, point: float) -> float:
     """Round to the instrument's point so replay is bit-identical (§0.7)."""
     return round(price / point) * point
+
+
+@dataclass(frozen=True, slots=True)
+class Imbalance:
+    """A three-candle gap: the primitive behind both FVG objects and displacement.
+
+    Lives here rather than in `ict` so that `structure` can use it without importing
+    `ict`, which would make the module graph a cycle (see `analysis/base.py`).
+
+    Bullish: ``low(i+1) > high(i-1)``, leaving the interval ``[high(i-1), low(i+1)]``
+    untraded by the three-bar sequence. Bearish is the mirror. Wick extremes are used
+    rather than bodies, per `docs/02-definitions.md` §5.1.
+    """
+
+    lo: float
+    hi: float
+    bullish: bool
+
+    @property
+    def size(self) -> float:
+        return self.hi - self.lo
+
+    @property
+    def consequent_encroachment(self) -> float:
+        """Midpoint. ICT's 'CE'; the 50% level of the gap."""
+        return (self.hi + self.lo) / 2.0
+
+
+def three_candle_imbalance(prev_bar: Bar, next_bar: Bar) -> Imbalance | None:
+    """Gap between the bar BEFORE and the bar AFTER a middle bar, or None.
+
+    The middle bar is not an input: its own range is irrelevant to whether the outer two
+    leave an untraded interval, which is the whole content of the definition.
+    """
+    if next_bar.ohlc.l > prev_bar.ohlc.h:
+        return Imbalance(lo=prev_bar.ohlc.h, hi=next_bar.ohlc.l, bullish=True)
+    if next_bar.ohlc.h < prev_bar.ohlc.l:
+        return Imbalance(lo=next_bar.ohlc.h, hi=prev_bar.ohlc.l, bullish=False)
+    return None
