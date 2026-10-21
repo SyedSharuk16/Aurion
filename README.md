@@ -130,10 +130,16 @@ image. Copy `.env.example` to `.env` and fill it, then check it:
 ```bash
 git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git
 cd Aurion
-pip install -e ".[dev]"
-copy .env.example .env         # Windows cmd;  cp .env.example .env  on bash/macOS
-python scripts/setup.py        # verifies the chain and sends you one real message
+python3 -m pip install -e ".[dev]"      # `python` and `\` on Windows cmd
+cp .env.example .env                    # `copy .env.example .env` on Windows cmd
+python3 scripts/setup.py                # verifies the chain, sends you one real message
 ```
+
+Python **3.11+** is required (`StrEnum` and `datetime.UTC`); `setup.py` checks the version
+first so an older interpreter reports that rather than failing on an unrelated import.
+The interpreter is `python3` on Linux, WSL and macOS and `python` on Windows, and WSL has
+its own installation separate from any Windows one — installing in `cmd` does not install
+for WSL.
 
 `scripts/setup.py` is Python rather than a shell script so that one tested implementation
 runs from `cmd` on Windows, PowerShell, bash and a Linux VPS alike — a script per shell

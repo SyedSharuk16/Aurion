@@ -24,6 +24,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+#: `StrEnum` and `datetime.UTC` are 3.11 additions and the package uses both, so an older
+#: interpreter fails on import with a message about an unrelated symbol. Checked before any
+#: `aurion` import so the real reason is the one that gets printed.
+MIN_PYTHON = (3, 11)
+
 ROOT = Path(__file__).resolve().parent.parent
 # This is the setup script, so it has to work from a bare checkout, before
 # `pip install -e .` has put the package on the path. Only a genuinely missing
@@ -108,6 +113,15 @@ def explain_send_failure(description: str) -> None:
 def main() -> int:
     start = "--start" in sys.argv
     os.chdir(ROOT)
+
+    if sys.version_info < MIN_PYTHON:
+        have = ".".join(str(n) for n in sys.version_info[:3])
+        want = ".".join(str(n) for n in MIN_PYTHON)
+        die(
+            f"Python {want}+ is required; this is {have} ({sys.executable}).\n"
+            "         On Ubuntu/WSL:  sudo apt install python3.11 python3.11-venv\n"
+            "         then re-run with that interpreter, e.g.  python3.11 scripts/setup.py"
+        )
 
     step("1/6  environment file")
     load_env()
