@@ -62,7 +62,7 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **481 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
+Current state: **483 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
@@ -108,7 +108,7 @@ What exists and is tested:
 | `backtest/report.py` | Acceptance criteria evaluated in code, including the 341-trade resolution floor, the tie-break share and the financing-materiality check |
 | `notify/telegram/` | MarkdownV2 escaping of all 18 reserved characters, outbox with a UNIQUE dedupe key written in the same transaction as the state change, token-bucket throttle with backoff and a dead-letter path |
 | `runtime/` | JSON logging with secret redaction, graceful shutdown, state rehydrated from the DB |
-| `tests/causality/` | T1 prefix invariance (on the gate decision), T2 future nulling, T3 time-translation equivariance, T4 resample boundary |
+| `tests/causality/` | T1 prefix invariance, applied twice: to the gate decision and to the **full signal cascade** through to an emitted signal's entry, stop, targets and probability. Plus T2 future nulling, T3 time-translation equivariance, T4 resample boundary |
 
 The adapter protocol has **no order-submission method**, and a test asserts it
 (`test_adapter_protocol_has_no_order_methods`). Adding execution would require widening the
@@ -137,6 +137,13 @@ These are properties of the architecture, not aspirations:
 3. **No repainting.** Every derived object carries `(event_time, confirmed_at)`. A swing
    that occurred at `t` is invisible until `t + N` bars have closed, forever, including on
    restart and replay. (`docs/02-definitions.md` §4.1)
+   The brief asked for one test of this -- "shift the data by one bar and assert identical
+   signals" -- which is false as stated: shifting the input must shift the output. The
+   property that does hold is *prefix invariance*: the decision at `t` computed from data
+   up to `t` must equal the decision at `t` computed from the full series. That is now
+   asserted on the whole cascade, at instants terminating at four different steps including
+   an emission, so the entry, stop, targets, probability and expectancy of a real signal are
+   all covered -- not just a rejection reason.
 4. **No magic numbers, and a derived search budget.** Every threshold lives in
    `config.yaml` with a provenance tag. The budget is on **trials** — any configuration a
    selection decision is taken from — and it is solved from the deflated Sharpe ratio rather

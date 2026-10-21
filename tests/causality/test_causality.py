@@ -11,8 +11,9 @@ Four distinct properties are needed and they catch different bugs.
 | T3   | time-translation  | absolute-index or absolute-date leakage |
 | T4   | resample boundary | future-leaking resampling (left-labelled bars) |
 
-Phase 2 applies T1 to the admissibility gate, which is the only decision that exists yet.
-It extends to the signal engine in Phase 5 without changing shape.
+T1 is applied twice: to the admissibility gate, and to the full signal-engine cascade --
+the bias, the HTF arrays, the entry models, the geometry, the features and the decision
+rule. The gate version alone covers one decision out of nine.
 """
 
 from __future__ import annotations
@@ -23,16 +24,32 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from aurion.analysis.base import Direction, TrendState
+from aurion.analysis.ict.fvg import FVG
 from aurion.analysis.primitives import atr, atr_series
+from aurion.analysis.regime.correlation import session_vwap
+from aurion.analysis.regime.trend import trend_regime_state
+from aurion.analysis.regime.volatility import volatility_state
+from aurion.analysis.registry import AnalysisSnapshot, ObjectStore
+from aurion.analysis.structure.trend import Structure
 from aurion.core.marketview import MarketView
 from aurion.core.timeframe import UTC, TimeFrame
 from aurion.data.repository import InMemoryBarRepository
 from aurion.data.resample import ResamplerSet
 from aurion.data.types import OHLC, Bar
 from aurion.sessions.calendar import StaticCalendarProvider
-from aurion.sessions.gates import AdmissibilityGate, build_window_set
+from aurion.sessions.gates import AdmissibilityGate, GateResult, build_window_set
 from aurion.sessions.spread import SpreadTracker
-from tests.conftest import make_m1
+from aurion.signals.engine import (
+    EngineParams,
+    EvaluationContext,
+    InstrumentMeta,
+    SignalEngine,
+    Step,
+)
+from aurion.signals.model import ConstantProbabilityModel
+from tests.conftest import make_m1, zigzag
+from tests.unit.test_signals import CASCADE_PARAMS, MSS_DELTAS
 
 NY = ZoneInfo("America/New_York")
 
@@ -229,3 +246,124 @@ def test_t1_prefix_invariance_of_the_gate_decision(cfg):
         assert full.admissible == prefix.admissible, as_of
         assert full.reasons == prefix.reasons, as_of
         assert full.windows == prefix.windows, as_of
+
+
+def test_t1_prefix_invariance_of_the_signal_engine_decision(cfg):
+    """T1 extended to the full cascade, which is what the brief actually asked for.
+
+    For every evaluation instant t, the candidate computed from the prefix of the data up to
+    t must be identical to the candidate computed from the full series at t. The gate version
+    above covers one decision out of nine; this covers the bias, the HTF arrays, the entry
+    models, the geometry, the features and the decision rule -- every place a detector could
+    reach past `as_of`.
+
+    Separate `ObjectStore`s on purpose: one store would serve the full-series snapshot back
+    from its own cache and the comparison would be with itself.
+    """
+    bars = zigzag(MSS_DELTAS, timeframe=TimeFrame.M15)
+    full_repo = InMemoryBarRepository()
+    for bar in bars:
+        full_repo.add_bar(bar)
+
+    def decide(repo, as_of):
+        store = ObjectStore(CASCADE_PARAMS)
+        snapshot = store.snapshot(
+            MarketView(repo, as_of), "TEST", TimeFrame.M15, window=500, with_levels=True
+        )
+        structure = Structure(
+            TrendState.BEARISH, as_of, False, False, True, True,
+            snapshot.bars[-1].ohlc.h if snapshot.bars else 0.0,
+            snapshot.bars[-1].ohlc.l if snapshot.bars else 0.0,
+        )
+        # A far bullish gap, identical in both runs, so that some instants reach an actual
+        # emission: without a target at the R:R floor the cascade always stops at step 5 and
+        # the geometry, model and decision steps are never compared.
+        target = FVG(
+            "TEST", TimeFrame.H1, Direction.UP, 73.0, 74.0, 2.0,
+            as_of - timedelta(hours=8), as_of - timedelta(hours=7), middle_index=1,
+        )
+        htf = AnalysisSnapshot(
+            "TEST", TimeFrame.H4, as_of, snapshot.bars, snapshot.atr,
+            swings=snapshot.swings, structure=structure, breaks=snapshot.breaks,
+            fvgs=[*snapshot.fvgs, target], order_blocks=snapshot.order_blocks,
+            pools=snapshot.pools, sweeps=snapshot.sweeps, mss=snapshot.mss,
+            dealing_range=snapshot.dealing_range,
+        )
+        engine = SignalEngine(
+            EngineParams(
+                require_w1_d1_agreement=False, rr_min=2.0, expected_r_min=-9.0,
+                p_floor=0.0, mss_window_bars=20,
+            ),
+            store,
+            _PermissiveGate(),
+            {"TEST": InstrumentMeta(0.01, 100.0, "XAU", "USD")},
+            ConstantProbabilityModel(p=0.55),
+        )
+        # The regime states and the reference level are derived from the same prefix, so they
+        # are part of what is being compared rather than constants handed to both runs.
+        entry_bars = list(snapshot.bars)
+        context = EvaluationContext(
+            entry_timeframe=TimeFrame.M15,
+            htf=dict.fromkeys(("W1", "D1", "H4", "H1"), htf),
+            volatility=volatility_state(entry_bars, percentile_window=40) if entry_bars else None,
+            regime_trend=trend_regime_state(entry_bars, vr_window=40) if entry_bars else None,
+            vwap=session_vwap(entry_bars, entry_bars[0].open_time) if entry_bars else None,
+            reference_levels={"pdh": entry_bars[-1].ohlc.c + 5} if entry_bars else {},
+            weekday=as_of.weekday(),
+            spread=0.2,
+        )
+        return engine.evaluate(MarketView(repo, as_of), "TEST", as_of, context, 500)
+
+    # Every fifth bar close from the point two confirmed swings exist, to the end.
+    instants = [bar.close_time for bar in bars[12::5]]
+    assert len(instants) >= 8
+
+    differing = []
+    steps = set()
+    for as_of in instants:
+        prefix_repo = InMemoryBarRepository()
+        for bar in bars:
+            if bar.close_time <= as_of:
+                prefix_repo.add_bar(bar)
+        full = decide(full_repo, as_of)
+        prefix = decide(prefix_repo, as_of)
+        steps.add(full.reached_step)
+        if _decision_of(full) != _decision_of(prefix):
+            differing.append((as_of, _decision_of(full), _decision_of(prefix)))
+
+    assert not differing, f"the full series changed {len(differing)} decisions: {differing[:3]}"
+    # A prefix-invariance test over instants that all stop at the same step proves almost
+    # nothing, so the spread of terminal steps is itself asserted -- including one emission,
+    # so that the property is verified on a full signal (entry, stop, targets, p_hat,
+    # expected_r, id) and not only on rejections.
+    assert len(steps) >= 3, f"only reached {sorted(s.name for s in steps)}"
+    assert Step.EMITTED in steps, "no instant emitted; the decision rule is untested here"
+
+
+def _decision_of(candidate):
+    """Everything the funnel and the alert are built from."""
+    geometry = candidate.geometry
+    return (
+        candidate.reached_step,
+        candidate.rejected_reason,
+        candidate.direction,
+        candidate.entry_model,
+        None if geometry is None else (geometry.entry, geometry.stop_loss),
+        None if geometry is None else tuple(t.price for t in geometry.targets),
+        candidate.p_hat,
+        candidate.expected_r,
+        candidate.signal_id if candidate.emitted else None,
+    )
+
+
+class _PermissiveGate:
+    """Admissibility has its own T1 test above; here it must not vary with the prefix."""
+
+    def evaluate(self, instrument, as_of, view, spread=None):
+        return GateResult(
+            admissible=True,
+            reasons=(),
+            window_label="ny_am_kz",
+            windows=("ny_am_kz",),
+            details={"minutes_into_week": 600},
+        )
