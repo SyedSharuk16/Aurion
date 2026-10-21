@@ -13,7 +13,12 @@ import pytest
 from aurion.analysis.base import ArrayState, BreakKind, Direction, Side, SwingKind
 from aurion.analysis.ict.fvg import available_fvgs, find_bprs, find_fvgs
 from aurion.analysis.ict.mss import find_mss
-from aurion.analysis.ict.order_block import breakers, find_order_blocks
+from aurion.analysis.ict.order_block import (
+    OrderBlock,
+    available_blocks,
+    breakers,
+    find_order_blocks,
+)
 from aurion.analysis.ict.pd_range import dealing_range
 from aurion.analysis.ict.pools import PoolKind, find_equal_pools, mark_swept, reference_pool
 from aurion.analysis.ict.sweeps import find_sweeps
@@ -77,7 +82,15 @@ def test_a_close_beyond_the_gap_inverts_polarity_but_a_wick_only_fills_it():
     assert closed_below.state is ArrayState.INVERTED
     assert closed_below.inverted_at is not None
     assert closed_below.effective_direction is Direction.DOWN
-    assert not closed_below.available
+    # §5.2: "It then behaves as a bearish array over the same interval." Availability means
+    # usable in `effective_direction`, so an inverse FVG is available -- it is a bearish
+    # array now, not a dead bullish one. This assertion previously read `not available`,
+    # which made the inverse FVG unreachable from every consumer in the system.
+    assert closed_below.available
+    assert available_fvgs([closed_below], closed_below.confirmed_at, Direction.DOWN) == [
+        closed_below
+    ]
+    assert available_fvgs([closed_below], closed_below.confirmed_at, Direction.UP) == []
 
 
 def test_available_fvgs_filters_on_confirmation_and_polarity():
@@ -141,12 +154,75 @@ def test_invalid_extent_is_refused():
         find_order_blocks(bars, breaks, 10, 0.01, extent="midpoint")
 
 
+def _breaker_series():
+    """Up-breaks, then a deep reversal that invalidates one block and down-breaks after it.
+
+    `_break_series` produces no invalidated block at all, which is why
+    `test_breaker_requires_invalidation_and_an_opposing_break` asserts nothing: its loop
+    body never runs. This sequence yields both cases -- an invalidated block that became a
+    breaker and one that did not -- so availability can be told apart from invalidation.
+    """
+    bars = zigzag(
+        [
+            1, 1, 2, -1, -1, 1, 3, 1, -2, -1, 2, 2, 1, -1, 1, 6, 1, -1, -2, 1, 2, 1, -1, 5,
+            -1, -8, -1, 1, -1, -2, -9, -1, 1,
+        ]
+    )
+    swings = find_swings(bars, 2)
+    return bars, find_breaks(bars, swings, k=0.8, point=0.01)
+
+
 def test_breaker_requires_invalidation_and_an_opposing_break():
-    bars, _, breaks = _break_series()
+    bars, breaks = _breaker_series()
     blocks = find_order_blocks(bars, breaks, 10, 0.01, breaker_window_bars=40)
-    for block in breakers(blocks, bars[-1].close_time):
+    found = breakers(blocks, bars[-1].close_time)
+    assert found, "an empty list makes the loop below assert nothing"
+    for block in found:
         assert block.invalidated_at is not None
+        assert block.breaker_at is not None
+        assert block.breaker_at > block.invalidated_at
         assert block.effective_direction is block.direction.opposite
+
+
+def test_a_breaker_is_usable_but_a_plain_invalidated_block_is_not():
+    """Invalidation is the precondition for a breaker (§5.4), so every breaker carries
+    ``state = INVALIDATED``. Rejecting that state rejected every breaker, leaving the
+    detector, the `breakers()` helper and the definition in place with nothing able to use
+    one.
+    """
+    bars, breaks = _breaker_series()
+    as_of = bars[-1].close_time
+    blocks = find_order_blocks(bars, breaks, 10, 0.01, breaker_window_bars=40)
+
+    invalidated = [b for b in blocks if b.state is ArrayState.INVALIDATED]
+    assert invalidated, "fixture no longer produces an invalidated block"
+    assert any(b.breaker_at is None for b in invalidated), "no negative case in the fixture"
+    for block in invalidated:
+        assert block.available is (block.breaker_at is not None)
+
+    confirmed = breakers(blocks, as_of)
+    assert confirmed, "fixture no longer produces a breaker"
+    for block in confirmed:
+        flipped = block.direction.opposite
+        assert block in available_blocks(blocks, as_of, flipped)
+        assert block not in available_blocks(blocks, as_of, block.direction)
+
+
+def test_a_mitigated_block_stays_unusable_in_either_polarity():
+    block = OrderBlock(
+        "TEST",
+        TimeFrame.M5,
+        Direction.UP,
+        100.0,
+        101.0,
+        datetime(2024, 6, 12, 9, 0, tzinfo=UTC),
+        datetime(2024, 6, 12, 9, 5, tzinfo=UTC),
+        BreakKind.BOS,
+        3,
+        state=ArrayState.MITIGATED,
+        fill_frac=1.0,
+    )
+    assert not block.available
 
 
 # -- pools -------------------------------------------------------------------

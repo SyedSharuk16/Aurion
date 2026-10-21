@@ -22,9 +22,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from aurion.analysis.regime.correlation import session_vwap
-from aurion.analysis.regime.trend import trend_regime_state
-from aurion.analysis.regime.volatility import volatility_state
 from aurion.analysis.registry import AnalysisParams, ObjectStore, params_from_config
 from aurion.config.models import AurionConfig, load_config
 from aurion.core.bus import EventBus
@@ -50,9 +47,13 @@ from aurion.notify.telegram.outbox import Outbox, OutboxKind, OutboxMessage, ded
 from aurion.runtime.logging import configure, log_candidate
 from aurion.sessions.calendar import CalendarProvider, NullCalendarProvider
 from aurion.sessions.gates import AdmissibilityGate, build_spread_tracker, build_window_set
+from aurion.signals.context import (
+    DEFAULT_ANALYSIS_WINDOW,
+    DEFAULT_HTF_TIMEFRAMES,
+    build_context,
+)
 from aurion.signals.engine import (
     EngineParams,
-    EvaluationContext,
     InstrumentMeta,
     SignalEngine,
 )
@@ -240,19 +241,18 @@ class AurionApp:
         as_of = event.as_of
         view = MarketView(self.repo, as_of)
 
-        htf_frames = (TimeFrame.H1, TimeFrame.H4, TimeFrame.D1, TimeFrame.W1)
         refresh = event.bar.timeframe is TimeFrame.D1
-        htf = {
-            str(tf): self.objects.snapshot(view, instrument, tf, 400) for tf in htf_frames
-        }
-        entry_bars = list(view.usable_bars(instrument, self._entry_tf, 400))
-        quote = view.last_quote(instrument)
-        context = EvaluationContext(
+        context = build_context(
+            view,
+            instrument,
+            as_of,
+            self.objects,
             entry_timeframe=self._entry_tf,
-            htf=htf,
-            volatility=volatility_state(entry_bars) if entry_bars else None,
-            regime_trend=trend_regime_state(entry_bars) if entry_bars else None,
-            vwap=session_vwap(entry_bars, entry_bars[0].open_time) if entry_bars else None,
+            htf_timeframes=DEFAULT_HTF_TIMEFRAMES,
+            analysis_window=DEFAULT_ANALYSIS_WINDOW,
+            # Was missing: without it the SILVER_BULLET_FVG model can never fire live, so
+            # the backtest validated two entry models and the live process ran one.
+            windows=self.windows,
             macro={
                 name: value
                 for name, value in (
@@ -260,11 +260,10 @@ class AurionApp:
                 )
                 if value is not None
             },
-            weekday=as_of.weekday(),
-            spread=quote.spread if quote is not None else None,
-            active_usd_exposure=[],
         )
-        candidate = self.engine.evaluate(view, instrument, as_of, context, 400, refresh)
+        candidate = self.engine.evaluate(
+            view, instrument, as_of, context, DEFAULT_ANALYSIS_WINDOW, refresh
+        )
         self.state.evaluations += 1
         self.health.counters.candidates += 1
         if candidate.rejected_reason:

@@ -45,7 +45,20 @@ class OrderBlock:
 
     @property
     def available(self) -> bool:
-        return self.state not in (ArrayState.INVALIDATED, ArrayState.MITIGATED)
+        """Usable as a PD array, in ``effective_direction``.
+
+        Invalidation is the precondition for becoming a breaker (§5.4), so every breaker
+        carries ``state = INVALIDATED``. Rejecting that state outright therefore rejected
+        every breaker, leaving the detector, the `breakers()` helper and the definition in
+        place while nothing could ever use one. An invalidated block is usable only when the
+        opposing break confirmed it as a breaker, and then only in the opposite polarity,
+        which `effective_direction` already carries.
+        """
+        if self.state is ArrayState.MITIGATED:
+            return False
+        if self.state is ArrayState.INVALIDATED:
+            return self.breaker_at is not None
+        return True
 
     @property
     def effective_direction(self) -> Direction:

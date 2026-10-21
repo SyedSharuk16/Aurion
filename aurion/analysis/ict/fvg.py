@@ -52,8 +52,17 @@ class FVG:
 
     @property
     def available(self) -> bool:
-        """Usable as a PD array: not mitigated, not inverted."""
-        return self.state not in (ArrayState.MITIGATED, ArrayState.INVERTED)
+        """Usable as a PD array, in ``effective_direction``.
+
+        An inverted FVG IS available. §5.2: "It then behaves as a bearish array over the
+        same interval" (mirror for the other side), and that flipped polarity is what
+        `effective_direction` returns. Excluding it here made the inverse FVG unreachable
+        from every consumer -- each one tests `available` and `effective_direction`
+        together -- so a Tier 1 array was detected, labelled, documented, and then filtered
+        out of every decision. The ablation arm that is supposed to measure `ict_arrays`
+        would have measured a subset of them without saying so.
+        """
+        return self.state is not ArrayState.MITIGATED
 
     @property
     def effective_direction(self) -> Direction:

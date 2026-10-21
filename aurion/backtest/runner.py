@@ -22,21 +22,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from aurion import BACKTEST_DISCLAIMER
-from aurion.analysis.regime.correlation import session_vwap
-from aurion.analysis.regime.trend import trend_regime_state
-from aurion.analysis.regime.volatility import volatility_state
 from aurion.analysis.registry import AnalysisParams, ObjectStore
 from aurion.backtest.costs import CostParams, commission_cost, holds_through_rollover
 from aurion.backtest.metrics import FunnelReport
 from aurion.core.clock import SimClock
 from aurion.core.marketview import MarketView
-from aurion.core.timeframe import UTC, Anchor, Bucketer, TimeFrame
+from aurion.core.timeframe import Anchor, Bucketer, TimeFrame
 from aurion.data.repository import InMemoryBarRepository
 from aurion.data.resample import ResamplerSet
 from aurion.data.types import M1Candle
 from aurion.sessions.gates import AdmissibilityGate
 from aurion.sessions.windows import WindowSet
-from aurion.signals.engine import Candidate, EvaluationContext, SignalEngine
+from aurion.signals.context import (
+    DEFAULT_ANALYSIS_WINDOW,
+    DEFAULT_HTF_TIMEFRAMES,
+    build_context,
+)
+from aurion.signals.engine import Candidate, SignalEngine
 from aurion.signals.lifecycle import LifecycleManager, SignalState, TrackedSignal
 
 
@@ -136,13 +138,8 @@ class RunnerConfig:
     #: rollover check uses, so a run on an alternative D1 anchor (the Q2 robustness run)
     #: moves both together instead of resampling on one definition and reporting on another.
     anchors: dict[TimeFrame, Anchor] | None = None
-    htf_timeframes: tuple[TimeFrame, ...] = (
-        TimeFrame.H1,
-        TimeFrame.H4,
-        TimeFrame.D1,
-        TimeFrame.W1,
-    )
-    analysis_window: int = 400
+    htf_timeframes: tuple[TimeFrame, ...] = DEFAULT_HTF_TIMEFRAMES
+    analysis_window: int = DEFAULT_ANALYSIS_WINDOW
     optimistic_tie_break: bool = False
     assume_be_after_tp1: bool = True
     tp_allocation: tuple[float, ...] = (0.5, 0.3, 0.2)
@@ -263,46 +260,23 @@ class BacktestRunner:
         as_of: datetime,
         refresh_levels: bool = False,
     ) -> Candidate:
-        htf = {
-            str(tf): self._store.snapshot(view, instrument, tf, self._cfg.analysis_window)
-            for tf in self._cfg.htf_timeframes
-        }
-        entry_bars = list(
-            view.usable_bars(instrument, self._cfg.entry_timeframe, self._cfg.analysis_window)
-        )
-        m1 = view.m1(instrument, 1)
-        context = EvaluationContext(
+        context = build_context(
+            view,
+            instrument,
+            as_of,
+            self._store,
             entry_timeframe=self._cfg.entry_timeframe,
-            htf=htf,
-            volatility=volatility_state(entry_bars) if entry_bars else None,
-            regime_trend=trend_regime_state(entry_bars) if entry_bars else None,
-            vwap=(
-                session_vwap(entry_bars, entry_bars[0].open_time) if entry_bars else None
-            ),
-            active_usd_exposure=[],
-            weekday=as_of.astimezone(UTC).weekday(),
-            spread=m1[-1].spread_close if m1 else None,
-            silver_bullet_window_start=self._silver_bullet_start(as_of),
+            htf_timeframes=self._cfg.htf_timeframes,
+            analysis_window=self._cfg.analysis_window,
+            windows=self._cfg.windows,
+            # No macro: the backtest does not yet replay ALFRED vintages, and supplying
+            # today's values over historical bars would be the retroactive-revision leak
+            # `data/macro.py` exists to prevent. The live path passes them, so the feature
+            # distributions differ -- stated in the report rather than hidden here.
         )
         return self._engine.evaluate(
             view, instrument, as_of, context, self._cfg.analysis_window, refresh_levels
         )
-
-    def _silver_bullet_start(self, as_of: datetime) -> datetime | None:
-        """Start of the Silver Bullet window containing ``as_of``, if any.
-
-        The SILVER_BULLET_FVG model is time-conditioned and needs this. Leaving it unset
-        disables the model entirely, which is how a two-model design quietly became a
-        one-model design in the first full-year run.
-        """
-        if self._cfg.windows is None:
-            return None
-        for window in self._cfg.windows.active(as_of):
-            if "silver_bullet" in window.name:
-                occurrence = window.current_occurrence(as_of)
-                if occurrence is not None:
-                    return occurrence[0]
-        return None
 
     def _remember(self, candidate: Candidate) -> None:
         """Hook for persisting the feature vector at decision time.

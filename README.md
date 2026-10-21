@@ -62,7 +62,7 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **438 tests**, `ruff` clean, `mypy --strict` clean on 82 source files.
+Current state: **446 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
@@ -73,9 +73,9 @@ Branch coverage by package, because the aggregate hides the distribution:
 | `data/` | 88% | |
 | `backtest/` | 87% | |
 | `features/` | 86% | |
-| `signals/` | 77% | `engine.py` 56%, `entries.py` 42% -- see below |
+| `signals/` | 78% | `engine.py` 56%, `entries.py` 42% -- see below |
 | `notify/` | 72% | |
-| `runtime/` | 47% | `app.py` is the composition root: asyncio wiring, reconnect loops, signal handlers |
+| `runtime/` | 48% | `app.py` 40%: asyncio wiring, reconnect loops, signal handlers |
 | Total | 85% | |
 
 The weak numbers are stated rather than papered over. `signals/entries.py` at 42% and
@@ -122,9 +122,17 @@ These are properties of the architecture, not aspirations:
    because they are not given access to it. `MarketView(as_of=τ)` exposes only bars whose
    `close_time ≤ τ`, and only derived objects whose `confirmed_at ≤ τ`. Tests verify the
    property; the type boundary enforces it. (`docs/01-architecture.md` §3)
-2. **One code path.** The backtester and the live runtime differ only in which `Clock` and
-   which `BarSource` they are constructed with. There is no `if backtest:` anywhere in
-   `analysis/` or `signals/`. (`docs/01-architecture.md` §4)
+2. **One code path, now enforced rather than intended.** The backtester and the live
+   runtime differ only in which `Clock` and which `BarSource` they are constructed with.
+   There is no `if backtest:` anywhere in `analysis/` or `signals/`
+   (`docs/01-architecture.md` §4). This commitment was *violated* in the first build and the
+   violation is instructive: both paths built their own `EvaluationContext`, and the two had
+   drifted in opposite directions -- the backtester supplied the Silver Bullet window and no
+   macro conditioners, the live app supplied macro conditioners and no Silver Bullet window.
+   So the backtest would have validated a two-entry-model system with one feature
+   distribution while the live process ran a one-model system with another. There is now a
+   single `signals/context.py` builder, and a test fails if any other module constructs the
+   object at all. A commitment with no mechanism behind it is a hope.
 3. **No repainting.** Every derived object carries `(event_time, confirmed_at)`. A swing
    that occurred at `t` is invisible until `t + N` bars have closed, forever, including on
    restart and replay. (`docs/02-definitions.md` §4.1)
