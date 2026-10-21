@@ -13,9 +13,13 @@ import pytest
 
 from aurion import BACKTEST_DISCLAIMER
 from aurion.analysis.base import Direction
+from aurion.analysis.registry import ObjectStore
 from aurion.config.models import load_config
 from aurion.core.clock import SimClock
-from aurion.core.timeframe import UTC
+from aurion.core.events import BarClosed
+from aurion.core.marketview import MarketView
+from aurion.core.timeframe import UTC, TimeFrame
+from aurion.data.repository import InMemoryBarRepository
 from aurion.data.store import Store
 from aurion.notify.health import AlertKind, HealthMonitor
 from aurion.notify.telegram.bot import (
@@ -25,15 +29,19 @@ from aurion.notify.telegram.bot import (
     TelegramError,
     TelegramSettings,
 )
+from aurion.notify.telegram.charts import ChartAnnotation, render_signal_chart
 from aurion.notify.telegram.commands import (
     ClosedTrade,
     CommandContext,
     HealthView,
     active,
     levels,
+    pause,
+    resume,
     sessions,
     stats,
     status,
+    unauthorised,
 )
 from aurion.notify.telegram.formatters import (
     both_zones,
@@ -50,13 +58,16 @@ from aurion.notify.telegram.outbox import (
     TokenBucket,
     dedupe_key,
 )
-from aurion.runtime.app import AurionApp, preflight
+from aurion.runtime.app import CHART_BARS, AurionApp, preflight
 from aurion.runtime.logging import JsonFormatter, configure, log_candidate, redact
 from aurion.sessions.gates import build_window_set
 from aurion.signals.engine import Candidate, Step
+from aurion.signals.entries import EntryModel
 from aurion.signals.geometry import Target, TargetKind, TradeGeometry
 from aurion.signals.lifecycle import LifecycleManager, SignalState, TrackedSignal
 from aurion.signals.sizing import PositionSize
+from tests.conftest import bars_from, make_m1, zigzag
+from tests.unit.test_signals import CASCADE_PARAMS, MSS_DELTAS
 
 NY = ZoneInfo("America/New_York")
 T0 = datetime(2024, 6, 12, 13, 30, tzinfo=UTC)
@@ -296,6 +307,23 @@ def test_telegram_error_classifies_retryability():
 
 # -- commands ----------------------------------------------------------------
 @pytest.fixture(scope="module")
+def cascade_snapshot():
+    """A snapshot with real levels, pools, FVGs and a dealing range.
+
+    Reuses the searched MSS series from test_signals: a hand-built snapshot would let the
+    renderers pass on data the detectors never actually produce.
+    """
+    bars = zigzag(MSS_DELTAS, timeframe=TimeFrame.M15)
+    repo = InMemoryBarRepository()
+    for bar in bars:
+        repo.add_bar(bar)
+    view = MarketView(repo, bars[-1].close_time)
+    return ObjectStore(CASCADE_PARAMS).snapshot(
+        view, "TEST", TimeFrame.M15, window=500, with_levels=True
+    )
+
+
+@pytest.fixture(scope="module")
 def ctx():
     cfg = load_config("config.yaml")
     return CommandContext(
@@ -346,6 +374,73 @@ def test_active_handles_the_empty_case(ctx):
 
 def test_levels_without_a_snapshot_says_so(ctx):
     assert "no snapshot" in levels(ctx, "GBPUSD")
+
+
+def _with(ctx, **changes):
+    return CommandContext(**{**{f: getattr(ctx, f) for f in ctx.__slots__}, **changes})
+
+
+def test_active_renders_realised_and_unrealised_r_per_signal(ctx):
+    signal = TrackedSignal(
+        signal_id="sig-1",
+        instrument="XAUUSD",
+        direction=Direction.UP,
+        entry=2300.0,
+        stop_loss=2290.0,
+        targets=(2320.0, 2330.0),
+        expires_at=T0 + timedelta(hours=4),
+        created_at=T0,
+    )
+    text = active(_with(ctx, active_signals=[signal]), lambda _s: 2310.0)
+    plain = text.replace("\\", "").replace("*", "")
+    assert "XAUUSD LONG" in plain
+    assert "entry" in plain and "SL" in plain
+    assert "unrealised `+1.00`R" in plain, "10 points of profit on a 10-point stop is +1R"
+
+
+def test_active_says_not_available_rather_than_guessing_an_unrealised_r(ctx):
+    """A missing price is not a zero. Printing 0.00R would read as flat, not as unknown."""
+    signal = TrackedSignal(
+        signal_id="sig-2",
+        instrument="XAUUSD",
+        direction=Direction.DOWN,
+        entry=2300.0,
+        stop_loss=2310.0,
+        targets=(2280.0,),
+        expires_at=T0 + timedelta(hours=4),
+        created_at=T0,
+    )
+    plain = active(_with(ctx, active_signals=[signal]), lambda _s: None).replace("\\", "")
+    assert "unrealised `n/a`R" in plain
+
+
+def test_levels_renders_every_section_it_has_data_for(ctx, cascade_snapshot):
+    text = levels(_with(ctx, snapshots={"TEST": cascade_snapshot}), "TEST")
+    assert "Levels" in text
+    assert "Unswept pools" in text or "Swept" in text
+    assert "Unmitigated FVGs" in text
+    assert "Dealing range" in text and "equilibrium" in text
+
+
+def test_levels_marks_swept_pools_as_features_not_targets(ctx, cascade_snapshot):
+    """A swept pool is retained as a feature input; offering it as a target would be the bug."""
+    snapshot = cascade_snapshot
+    if not any(not p.available for p in snapshot.pools):
+        pytest.skip("fixture has no swept pool")
+    text = levels(_with(ctx, snapshots={"TEST": snapshot}), "TEST")
+    assert "not targets" in text
+
+
+def test_pause_and_resume_state_what_keeps_running(ctx):
+    paused = pause(ctx)
+    assert "Lifecycle tracking continues" in paused.replace("\\", "")
+    assert "survives a restart" in paused.replace("\\", "")
+    assert "may be emitted again" in resume(ctx).replace("\\", "")
+
+
+def test_an_unauthorised_command_names_the_user_without_acting(ctx):
+    text = unauthorised("99887766")
+    assert "unauthorised" in text and "99887766" in text
 
 
 # -- health ------------------------------------------------------------------
@@ -540,3 +635,216 @@ async def test_a_health_alert_falls_back_to_the_signal_chat(store, cfg):
     await _app(store, cfg, "")._alert("calendar unavailable", "calendar_outage")
     async with store.session() as session:
         assert [row.chat_id for row in await Outbox().due(session, T0)] == ["-1001"]
+
+
+# -- charts ------------------------------------------------------------------
+def _chart_bars(n: int = 40):
+    rows = [(100.0 + i * 0.3, 100.2 + i * 0.3, 0.2, 0.3) for i in range(n)]
+    return bars_from(rows, "XAUUSD", TimeFrame.M15, T0)
+
+
+def test_a_signal_chart_is_actually_rendered(tmp_path):
+    """charts.py had 0% coverage and no caller: every alert went out text-only.
+
+    Asserting a non-trivial PNG rather than just a returned path -- a renderer that writes an
+    empty file is the failure that would otherwise reach Telegram.
+    """
+    out = tmp_path / "nested" / "signal.png"
+    annotation = ChartAnnotation(
+        entry=105.0,
+        stop_loss=103.0,
+        targets=(109.0, 112.0),
+        swept_level=102.5,
+        sweep_extremity=102.0,
+        arrays=((104.0, 105.5, "H1_fvg"),),
+        levels=(101.0, 110.0),
+        title="XAUUSD bullish sig-1",
+        direction=Direction.UP,
+        notes=["session_is_ny_am +0.41", "sweep_depth_atr -0.12"],
+    )
+    path = render_signal_chart(_chart_bars(), annotation, out)
+    assert path == out
+    assert out.exists() and out.stat().st_size > 5_000
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_an_empty_bar_window_renders_nothing_rather_than_raising(tmp_path):
+    """A chart failure must not stop a signal going out."""
+    out = tmp_path / "empty.png"
+    assert render_signal_chart([], ChartAnnotation(), out) is None
+    assert not out.exists()
+
+
+def test_a_bare_annotation_still_renders(tmp_path):
+    out = tmp_path / "bare.png"
+    assert render_signal_chart(_chart_bars(5), ChartAnnotation(), out) == out
+    assert out.stat().st_size > 1_000
+
+
+def test_only_the_last_max_bars_are_drawn(tmp_path):
+    """The window the app fetches and the window the renderer draws must be the same size."""
+    wide = render_signal_chart(_chart_bars(200), ChartAnnotation(), tmp_path / "wide.png", 20)
+    narrow = render_signal_chart(_chart_bars(20), ChartAnnotation(), tmp_path / "narrow.png", 20)
+    assert wide is not None and narrow is not None
+    assert CHART_BARS == 120, "app and renderer defaults must agree"
+
+
+# -- the live handler --------------------------------------------------------
+def _emitted_candidate() -> Candidate:
+    geometry = TradeGeometry(
+        direction=Direction.UP,
+        entry=2305.0,
+        stop_loss=2295.0,
+        targets=(Target(2325.0, TargetKind.LEVEL, "sr_level"),),
+    )
+    return Candidate(
+        "XAUUSD",
+        T0,
+        Step.EMITTED,
+        None,
+        direction=Direction.UP,
+        geometry=geometry,
+        entry_model=EntryModel.SWEEP_MSS_RETRACE,
+        reasons=(("session_is_ny_am", 0.41), ("sweep_depth_atr", -0.12)),
+    )
+
+
+def _live_app(store, cfg, tmp_path):
+    app = _app(store, cfg, "-1002")
+    app._chart_dir = tmp_path / "charts"
+    return app
+
+
+async def test_a_closed_entry_bar_is_evaluated_and_counted(store, cfg, tmp_path):
+    """`runtime/app.py` is the composition root and was almost entirely untested.
+
+    A series this short cannot produce an HTF bias, so this asserts the handler ran and
+    attributed the rejection -- not that a signal came out. The cascade's own outcomes are
+    tested in test_signals.
+    """
+    app = _live_app(store, cfg, tmp_path)
+    bars = bars_from(
+        [(2300.0 + i * 0.4, 2300.2 + i * 0.4, 0.2, 0.3) for i in range(40)],
+        "XAUUSD",
+        TimeFrame.M15,
+        T0,
+    )
+    for bar in bars:
+        app.repo.add_bar(bar)
+    for i in range(40):
+        app.repo.add_m1(make_m1("XAUUSD", T0 + timedelta(minutes=i), 2300.0 + i * 0.1))
+
+    await app._on_bar_closed(BarClosed(bars[-1]))
+
+    assert app.state.evaluations == 1
+    assert app.health.counters.candidates == 1
+    assert app.health.counters.bars_ingested == 1
+    assert app.state.emitted == 0
+    async with store.session() as session:
+        assert await Outbox().due(session, bars[-1].close_time) == []
+
+
+async def test_a_paused_app_ingests_the_bar_but_does_not_evaluate(store, cfg, tmp_path):
+    """Pause must stop emission without stopping ingestion, or the gap repair fires on resume."""
+    app = _live_app(store, cfg, tmp_path)
+    app.state.paused = True
+    bar = bars_from([(2300.0, 2300.5, 0.2, 0.3)], "XAUUSD", TimeFrame.M15, T0)[0]
+    app.repo.add_bar(bar)
+
+    await app._on_bar_closed(BarClosed(bar))
+
+    assert app.health.counters.bars_ingested == 1
+    assert app.state.evaluations == 0
+
+
+async def test_a_bar_on_another_timeframe_is_ignored_by_the_entry_handler(store, cfg, tmp_path):
+    app = _live_app(store, cfg, tmp_path)
+    bar = bars_from([(2300.0, 2300.5, 0.2, 0.3)], "XAUUSD", TimeFrame.H1, T0)[0]
+    await app._on_bar_closed(BarClosed(bar))
+    assert app.health.counters.bars_ingested == 0
+    assert app.state.evaluations == 0
+
+
+async def test_a_lifecycle_transition_is_enqueued_once_and_counted(store, cfg, tmp_path):
+    app = _live_app(store, cfg, tmp_path)
+    app.clock = SimClock(T0 + timedelta(minutes=10))
+    tracked = TrackedSignal(
+        signal_id="sig-live",
+        instrument="XAUUSD",
+        direction=Direction.UP,
+        entry=2300.0,
+        stop_loss=2295.0,
+        targets=(2310.0,),
+        expires_at=T0 + timedelta(hours=4),
+        created_at=T0,
+    )
+    app.lifecycle.add(tracked)
+    # One M1 that reaches the entry and then the stop in the same minute.
+    app.repo.add_m1(
+        make_m1("XAUUSD", T0 + timedelta(minutes=9), 2301.0, high_off=0.5, low_off=7.0)
+    )
+
+    await app.step_lifecycle("XAUUSD")
+
+    assert app.state.transitions >= 1
+    async with store.session() as session:
+        rows = await Outbox().due(session, T0 + timedelta(minutes=10))
+    assert rows and all(row.chat_id == "-1001" for row in rows)
+
+
+async def test_an_emitted_signal_gets_a_chart(store, cfg, tmp_path):
+    """The chart was built, documented, config-gated -- and never called by anything."""
+    app = _live_app(store, cfg, tmp_path)
+    bars = bars_from(
+        [(2300.0 + i * 0.4, 2300.2 + i * 0.4, 0.2, 0.3) for i in range(30)],
+        "XAUUSD",
+        TimeFrame.M15,
+        T0,
+    )
+    for bar in bars:
+        app.repo.add_bar(bar)
+    view = MarketView(app.repo, bars[-1].close_time)
+
+    path = await app._render_chart(_emitted_candidate(), view, "XAUUSD")
+
+    assert path is not None and path.exists()
+    assert path.read_bytes()[:4] == b"\x89PNG"
+    assert path.parent == tmp_path / "charts"
+    assert path.stem == _emitted_candidate().signal_id, "named by the signal it illustrates"
+
+
+async def test_charts_can_be_switched_off_without_touching_the_alert(store, cfg, tmp_path):
+    app = _live_app(store, cfg, tmp_path)
+    app.cfg.notify["send_charts"] = False
+    try:
+        bar = bars_from([(2300.0, 2300.5, 0.2, 0.3)], "XAUUSD", TimeFrame.M15, T0)[0]
+        app.repo.add_bar(bar)
+        view = MarketView(app.repo, bar.close_time)
+        assert await app._render_chart(_emitted_candidate(), view, "XAUUSD") is None
+    finally:
+        app.cfg.notify["send_charts"] = True
+
+
+async def test_a_chart_that_times_out_does_not_block_the_alert(store, cfg, tmp_path):
+    """The timeout was described in the renderer's docstring with no mechanism behind it."""
+    app = _live_app(store, cfg, tmp_path)
+    app.cfg.notify["chart_timeout_s"] = 0.0
+    try:
+        bars = bars_from(
+            [(2300.0 + i * 0.4, 2300.2 + i * 0.4, 0.2, 0.3) for i in range(30)],
+            "XAUUSD",
+            TimeFrame.M15,
+            T0,
+        )
+        for bar in bars:
+            app.repo.add_bar(bar)
+        view = MarketView(app.repo, bars[-1].close_time)
+        assert await app._render_chart(_emitted_candidate(), view, "XAUUSD") is None
+    finally:
+        app.cfg.notify["chart_timeout_s"] = 10.0
+
+
+async def test_no_bars_means_no_chart_rather_than_an_exception(store, cfg, tmp_path):
+    app = _live_app(store, cfg, tmp_path)
+    view = MarketView(app.repo, T0)
+    assert await app._render_chart(_emitted_candidate(), view, "XAUUSD") is None

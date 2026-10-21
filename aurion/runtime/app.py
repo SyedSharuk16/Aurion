@@ -42,6 +42,7 @@ from aurion.notify.telegram.bot import (
     TelegramSettings,
     TelegramTransport,
 )
+from aurion.notify.telegram.charts import ChartAnnotation, render_signal_chart
 from aurion.notify.telegram.formatters import format_signal, format_transition
 from aurion.notify.telegram.outbox import Outbox, OutboxKind, OutboxMessage, dedupe_key
 from aurion.runtime.logging import configure, log_candidate
@@ -53,6 +54,7 @@ from aurion.signals.context import (
     build_context,
 )
 from aurion.signals.engine import (
+    Candidate,
     EngineParams,
     InstrumentMeta,
     SignalEngine,
@@ -61,6 +63,10 @@ from aurion.signals.lifecycle import LifecycleManager, TrackedSignal
 from aurion.signals.model import ConstantProbabilityModel, LogisticModel
 
 _log = logging.getLogger(__name__)
+
+#: Bars drawn on a signal chart. Matches `render_signal_chart`'s own default so the
+#: window fetched and the window drawn cannot drift apart.
+CHART_BARS = 120
 
 PAUSE_KEY = "notify.paused"
 
@@ -180,6 +186,9 @@ class AurionApp:
         self._entry_tf = entry_timeframe
         self._stop = asyncio.Event()
         self._points = points
+        # Charts are transient artefacts of an alert, not state: they live beside the
+        # logs, are gitignored, and nothing reads them back.
+        self._chart_dir = Path(os.environ.get("AURION_CHART_DIR", "./reports/charts"))
         self._pending: set[asyncio.Task[None]] = set()
 
     # -- wiring ------------------------------------------------------------
@@ -300,6 +309,7 @@ class AurionApp:
             self._points.get(instrument, 0.01),
             paper=self.cfg.meta.mode != "live_alerts",
         )
+        chart = await self._render_chart(candidate, view, instrument)
         async with self.store.session() as session, session.begin():
             await self.outbox.enqueue(
                 session,
@@ -308,9 +318,56 @@ class AurionApp:
                     self.telegram.signal_chat_id,
                     OutboxKind.SIGNAL,
                     text,
+                    chart_path=str(chart) if chart is not None else None,
                 ),
                 as_of,
             )
+
+    async def _render_chart(
+        self, candidate: Candidate, view: MarketView, instrument: str
+    ) -> Path | None:
+        """Annotated PNG for an emitted signal, or ``None``.
+
+        `docs/03` §7.3 promises a chart under `notify.send_charts`, rendered off the event
+        loop, and the text sent without it past `notify.chart_timeout_s`. Nothing called
+        `render_signal_chart` at all, so every alert was text-only and the timeout the
+        renderer's own docstring described had no mechanism behind it. The chart is a
+        convenience and the alert is the product, so every failure path here returns None.
+        """
+        if not self.cfg.notify.get("send_charts", True) or candidate.geometry is None:
+            return None
+        bars = list(view.usable_bars(instrument, self._entry_tf, CHART_BARS))
+        if not bars:
+            return None
+        geometry = candidate.geometry
+        annotation = ChartAnnotation(
+            entry=geometry.entry,
+            stop_loss=geometry.stop_loss,
+            targets=tuple(t.price for t in geometry.targets),
+            swept_level=candidate.proposal.sweep.pool_level
+            if candidate.proposal is not None and candidate.proposal.sweep is not None
+            else None,
+            sweep_extremity=candidate.proposal.sweep.extremity
+            if candidate.proposal is not None and candidate.proposal.sweep is not None
+            else None,
+            title=f"{instrument} {geometry.direction.label} {candidate.signal_id}",
+            direction=geometry.direction,
+            # `reasons` are (feature, log-odds) pairs: rendered with the signed
+            # contribution, because "session_is_ny_am" alone says nothing about which way
+            # it pushed.
+            notes=[f"{name} {value:+.2f}" for name, value in candidate.reasons],
+        )
+        out = self._chart_dir / f"{candidate.signal_id}.png"
+        timeout = float(self.cfg.notify.get("chart_timeout_s", 10.0))
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(render_signal_chart, bars, annotation, out, CHART_BARS),
+                timeout=timeout,
+            )
+        except (TimeoutError, OSError, ValueError) as exc:
+            # Never fatal: a missing chart is a smaller problem than a missing alert.
+            _log.warning("chart rendering failed, sending text only: %s", exc)
+            return None
 
     async def step_lifecycle(self, instrument: str) -> None:
         """Advance open signals on the newest M1 bar and enqueue one update each.

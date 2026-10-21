@@ -62,28 +62,30 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **462 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
+Current state: **481 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
 |---|---|---|
 | `core/` | 94% | |
-| `signals/` | 94% | the cascade, entry models, geometry, model, lifecycle |
+| `signals/` | 94% | the cascade, both entry models, geometry, model, lifecycle |
 | `analysis/` | **93%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
 | `sessions/` | 92% | |
+| `notify/` | 90% | |
 | `data/` | 88% | |
-| `backtest/` | 87% | |
+| `backtest/` | 88% | |
 | `features/` | 87% | |
-| `notify/` | 72% | |
-| `runtime/` | 48% | `app.py` 40%: asyncio wiring, reconnect loops, signal handlers |
-| Total | 87% | |
+| `runtime/` | 60% | `app.py` 55%: the asyncio run loop, rehydration, `build_app` |
+| Total | 90% | |
 
-`runtime/app.py` at 40% is the one real gap and it is stated rather than papered over. It is
-the composition root: asyncio wiring, reconnect loops and signal handlers, where unit tests
-mostly assert that mocks were called. The decision path it drives is covered directly --
-`signals/engine.py` is at 93% through a full-cascade test on a real M15 series carrying a
-genuine sweep, CHoCH and MSS, asserting the outcome at each of the eight steps -- so what is
-uncovered is process wiring, which is what the Phase 2E pilot exercises first.
+`runtime/app.py` is the one that stays low and the reason is stated rather than hidden: what
+is left uncovered is the asyncio run loop, the reconnect path and the process entry point,
+where a unit test mostly asserts that a mock was called. Its *decision* path is covered
+directly -- the bar-close handler, the lifecycle step, the chart render and the alert
+routing all have tests -- and `signals/engine.py` is at 93% through a full-cascade test on a
+real M15 series carrying a genuine sweep, CHoCH and MSS, asserting the outcome at each of
+the eight steps. The uncovered remainder is process wiring, which is what the Phase 2E
+pilot exercises first.
 
 What exists and is tested:
 

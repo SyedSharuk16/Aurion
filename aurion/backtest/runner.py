@@ -123,8 +123,32 @@ class BacktestResult:
         return [by_day[k] for k in sorted(by_day)]
 
     def ledger_digest(self) -> str:
-        """Hash of the trade ledger. Two runs at the same config must match exactly."""
+        """Hash of the trade ledger. Two runs at the same config must match exactly.
+
+        Note what this does NOT detect: with no resolved trades it is the hash of ``[]``, a
+        constant, so a determinism check built on it alone passes vacuously -- which is the
+        state of every run so far and of any live system inside the ~6-month W1 warm-up.
+        Use `decision_digest` to compare runs.
+        """
         payload = json.dumps([t.as_dict() for t in self.trades], sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def decision_digest(self) -> str:
+        """Hash of every decision the run made, not only the ones that became trades.
+
+        One entry per evaluation: where it stopped and why. This is what makes a determinism
+        comparison meaningful before anything is ever emitted, and it is sensitive to a
+        reordering of the candidate stream as well as to a changed decision.
+        """
+        payload = json.dumps(
+            [
+                [c.instrument, c.as_of.isoformat(), c.reached_step.name, c.rejected_reason]
+                for c in self.candidates
+            ]
+            + [t.as_dict() for t in self.trades],
+            sort_keys=True,
+            default=str,
+        )
         return hashlib.sha256(payload.encode()).hexdigest()
 
 

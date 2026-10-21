@@ -55,7 +55,7 @@ from aurion.backtest.metrics import (
     widest,
 )
 from aurion.backtest.report import MIN_OOS_TRADES, ValidationReport, monte_carlo_sections
-from aurion.backtest.runner import BacktestRunner, RunnerConfig
+from aurion.backtest.runner import BacktestResult, BacktestRunner, RunnerConfig
 from aurion.backtest.walkforward import (
     LabelledEvent,
     build_plan,
@@ -70,7 +70,13 @@ from aurion.features.schema import Tag
 from aurion.sessions.calendar import StaticCalendarProvider
 from aurion.sessions.gates import AdmissibilityGate, build_window_set
 from aurion.sessions.spread import SpreadTracker
-from aurion.signals.engine import EngineParams, InstrumentMeta, SignalEngine
+from aurion.signals.engine import (
+    Candidate,
+    EngineParams,
+    InstrumentMeta,
+    SignalEngine,
+    Step,
+)
 from aurion.signals.model import ConstantProbabilityModel
 
 T0 = datetime(2024, 6, 12, 9, 0, tzinfo=UTC)
@@ -625,11 +631,34 @@ def test_the_funnel_accounts_for_every_evaluation(cfg):
 
 
 def test_a_replay_is_deterministic(cfg):
+    """Compared on the decision digest, not the ledger digest.
+
+    With no resolved trades the ledger digest is the hash of `[]` -- a constant -- so a
+    comparison on it would pass even if the engine were non-deterministic. Every run so far
+    has resolved zero trades, and a live system inside the W1 warm-up resolves none either,
+    so that is the normal case rather than an edge one.
+    """
     candles = _replay_m1()
     first = _runner(cfg).run({_INST: candles}, config_hash="t")
     second = _runner(cfg).run({_INST: candles}, config_hash="t")
-    assert first.ledger_digest() == second.ledger_digest()
+
+    assert first.decision_digest() == second.decision_digest()
+    assert first.funnel.by_reason == second.funnel.by_reason
     assert (first.evaluations, first.funnel.emitted) == (second.evaluations, second.funnel.emitted)
+
+
+def test_the_decision_digest_is_sensitive_to_a_changed_decision():
+    """Otherwise the determinism check above is as vacuous as the one it replaced."""
+    base = BacktestResult(config_hash="t")
+    base.candidates.append(Candidate("XAUUSD", T0, Step.HTF_BIAS, "bias:unavailable"))
+    other = BacktestResult(config_hash="t")
+    other.candidates.append(Candidate("XAUUSD", T0, Step.HTF_BIAS, "bias:no_direction"))
+    empty = BacktestResult(config_hash="t")
+
+    assert base.decision_digest() != other.decision_digest()
+    assert base.decision_digest() != empty.decision_digest()
+    # And the point of the change: the ledger digest cannot tell these two apart at all.
+    assert base.ledger_digest() == empty.ledger_digest()
 
 
 def test_the_disclaimer_travels_with_the_result(cfg):
