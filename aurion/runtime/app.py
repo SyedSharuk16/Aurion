@@ -51,7 +51,9 @@ from aurion.runtime.logging import configure, log_candidate
 from aurion.sessions.calendar import (
     CalendarProvider,
     NullCalendarProvider,
+    StaticCalendarProvider,
     calendar_from_env,
+    is_template,
 )
 from aurion.sessions.gates import AdmissibilityGate, build_spread_tracker, build_window_set
 from aurion.signals.context import (
@@ -630,6 +632,16 @@ def build_app(config_path: str | Path | None = None) -> AurionApp:
     # `news.fail_safe = block` suppresses every signal -- so the process could not emit at
     # all, and said so in exactly one admin alert.
     calendar = calendar_from_env(os.environ)
+    if isinstance(calendar, StaticCalendarProvider) and is_template(
+        calendar.events(datetime.min.replace(tzinfo=UTC), datetime.max.replace(tzinfo=UTC))
+    ):
+        # Every start, not once: a file of invented release times blocks the wrong minutes,
+        # and the only thing distinguishing it from a real schedule at runtime is this check.
+        _log.warning(
+            "the calendar is the shipped TEMPLATE: its release times are invented, so the "
+            "news gate is blocking the wrong minutes. Replace it before acting on an alert "
+            "(see data/README.md)."
+        )
     if isinstance(calendar, NullCalendarProvider) and cfg.news.fail_safe == "block":
         _log.warning(
             "no calendar provider configured and news.fail_safe=block: EVERY signal will be "

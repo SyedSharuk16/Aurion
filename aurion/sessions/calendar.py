@@ -17,7 +17,7 @@ than hiding.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -161,8 +161,11 @@ def load_calendar_events(path: str | Path) -> list[CalendarEvent]:
         # A bare FileNotFoundError here reads as a bug. Under `restart: unless-stopped`
         # it is also an endless crash-loop, so it names what is missing and why.
         raise ValueError(
-            f"calendar file not found: {file}. news.fail_safe is 'block', so the gate "
-            "cannot be left unfed. Check AURION_CALENDAR_PATH."
+            f"calendar file not found: {file}\n"
+            "  news.fail_safe is 'block', so the gate cannot be left unfed.\n"
+            "  To start on the TEMPLATE, whose dates are invented and which will block the\n"
+            "  wrong minutes:  cp data/calendar.example.json data/calendar.json\n"
+            "  Then replace it with a real schedule; see data/README.md for the schema."
         )
     raw = json.loads(file.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
@@ -195,6 +198,21 @@ def _require_aware(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         raise ValueError(f"{ts.isoformat()} has no timezone")
     return ts.astimezone(UTC)
+
+
+#: Markers the shipped template carries in every title. A calendar is checked for them
+#: because the file is otherwise indistinguishable from a real schedule at runtime, and a
+#: system running indefinitely on invented release times should say so on every start.
+TEMPLATE_MARKERS = ("REPLACE-ME", "NOT A REAL SCHEDULE")
+
+
+def is_template(events: Sequence[CalendarEvent]) -> bool:
+    """Whether these events came from the shipped template rather than a real schedule."""
+    return any(
+        marker in event.title or marker in event.event_id
+        for event in events
+        for marker in TEMPLATE_MARKERS
+    )
 
 
 def calendar_from_env(env: Mapping[str, str]) -> CalendarProvider:

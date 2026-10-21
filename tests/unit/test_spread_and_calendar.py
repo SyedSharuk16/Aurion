@@ -16,6 +16,7 @@ from aurion.sessions.calendar import (
     blackout_for,
     calendar_from_env,
     currencies_of,
+    is_template,
     load_calendar_events,
 )
 from aurion.sessions.spread import SpreadTracker
@@ -224,3 +225,24 @@ def test_a_directory_is_not_a_calendar_file(tmp_path):
     the shape this failure actually arrives in."""
     with pytest.raises(ValueError, match="calendar file not found"):
         load_calendar_events(tmp_path)
+
+
+def test_the_shipped_template_is_recognised_as_one():
+    """A file of invented release times is indistinguishable from a real schedule at runtime
+    unless something checks, and it blocks the wrong minutes."""
+    events = load_calendar_events("data/calendar.example.json")
+    assert events, "the template should contain example rows"
+    assert is_template(events)
+
+
+def test_a_real_schedule_is_not_flagged_as_the_template(tmp_path):
+    path = _write(tmp_path, [_event_json(title="Non-Farm Payrolls", event_id="nfp-2024-06")])
+    assert not is_template(load_calendar_events(path))
+
+
+def test_the_missing_file_error_names_the_remedy(tmp_path):
+    """The default config points at data/calendar.json, which ships nowhere, so this is the
+    first error every new deployment hits. A dead end here is a bad first experience."""
+    with pytest.raises(ValueError, match=r"calendar\.example\.json data/calendar\.json") as exc:
+        load_calendar_events(tmp_path / "absent.json")
+    assert "data/README.md" in str(exc.value)
