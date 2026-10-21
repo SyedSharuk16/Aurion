@@ -34,6 +34,7 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     event,
+    func,
     select,
 )
 from sqlalchemy.ext.asyncio import (
@@ -220,6 +221,12 @@ class Store:
             _apply_sqlite_pragmas(self._engine)
         self._session = async_sessionmaker(self._engine, expire_on_commit=False)
         self._adapter_name = adapter_name
+
+    async def ping(self) -> None:
+        """Raise if the schema is not there. Lets a caller distinguish an empty database
+        from an absent one, which are different problems with different remedies."""
+        async with self._session() as session:
+            await session.execute(select(func.count()).select_from(M1Row))
 
     async def create_all(self) -> None:
         async with self._engine.begin() as conn:

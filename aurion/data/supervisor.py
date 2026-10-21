@@ -386,12 +386,24 @@ class IngestSupervisor:
         """
         total = 0
         cursor = start
+        span = max((end - start).total_seconds(), 1.0)
         self._backfilling.add(instrument)
         try:
             while cursor < end:
                 slice_end = min(cursor + timedelta(days=COLD_START_SLICE_DAYS), end)
                 total += await self.backfill(instrument, cursor, slice_end)
                 cursor = slice_end
+                # Per slice, because a cold start is the longest silence this system ever
+                # has and without this there is no way to tell 2% done from broken. Both
+                # look like an empty Telegram channel.
+                _log.info(
+                    "backfill %s: %.0f%% (%s of %s days, %d candles)",
+                    instrument,
+                    100.0 * (cursor - start).total_seconds() / span,
+                    (cursor - start).days,
+                    (end - start).days,
+                    total,
+                )
         finally:
             # In a finally so a failed backfill does not leave the instrument permanently
             # exempt from staleness checks, which would hide a genuinely dead feed.

@@ -227,8 +227,17 @@ measurement is a synthetic year that emitted nothing, for reasons that are the g
 (see the funnel under *Known limitations*). Every alert will carry `[PAPER]` until the
 acceptance criteria in `docs/04` §8 pass, and they cannot be evaluated without purchased
 history. **Expect long silences by design, and do not read silence as "it is working".**
-`/status` reports the feed age, the evaluation count and the rejection breakdown, which is
-how you tell a working-but-quiet system from a stalled one.
+`/status` reports the feed age, the evaluation count and the rejection breakdown, and
+`python tools/progress.py` answers the question a silent channel cannot — whether it is
+still backfilling or finished and simply not finding setups:
+
+```
+instrument      M1 bars    days  of target  state
+----------------------------------------------------------------
+XAUUSD            4,320     3.0       1.7%  W1 bars: 0 -- too little history, bias gate will reject
+```
+
+Those two states look identical from outside and have completely different remedies.
 
 ---
 
