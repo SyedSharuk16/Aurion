@@ -51,6 +51,10 @@ ignore = ["ANN401"]
 # DTZ001 is allowed in tests because several tests construct a naive datetime
 # deliberately, to assert that it is rejected. That construction IS the test.
 "tests/*" = ["ANN", "DTZ001"]
+# Emoji in Telegram message templates are intentional, including ones ruff flags as
+# visually ambiguous with ASCII.
+"aurion/notify/telegram/formatters.py" = ["RUF001"]
+"aurion/notify/health.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

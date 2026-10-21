@@ -1,0 +1,53 @@
+# systemd alternative to Docker. Install:
+#   sudo cp deploy/aurion.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now aurion
+#
+# Assumes a venv at /opt/aurion/.venv and the repo at /opt/aurion, owned by user `aurion`.
+[Unit]
+Description=Aurion signal-only trading alert system
+Documentation=file:///opt/aurion/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aurion
+Group=aurion
+WorkingDirectory=/opt/aurion
+EnvironmentFile=/opt/aurion/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=MPLBACKEND=Agg
+Environment=AURION_CONFIG_PATH=/opt/aurion/config.yaml
+Environment=AURION_LOG_DIR=/opt/aurion/logs
+ExecStart=/opt/aurion/.venv/bin/python -m aurion.runtime.app
+
+Restart=always
+RestartSec=10
+# Give the app time to flush the outbox and checkpoint cursors on SIGTERM. A hard kill
+# would drop queued Telegram messages, which are the product.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Bounded memory so a leak restarts the unit rather than inviting the host OOM killer.
+MemoryMax=900M
+CPUQuota=90%
+
+# The process reads market data and sends messages. It needs no privilege beyond that.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/aurion/data /opt/aurion/logs /opt/aurion/reports
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aurion
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+# docker compose -f deploy/docker-compose.yml up -d
+#
+# Secrets come from .env only; config.yaml carries no secret and is baked into the image.
+services:
+  aurion:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aurion:latest
+    container_name: aurion
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      AURION_CONFIG_PATH: /app/config.yaml
+      AURION_DB_URL: sqlite+aiosqlite:////app/data/aurion.sqlite
+      AURION_LOG_DIR: /app/logs
+      AURION_LOG_LEVEL: ${AURION_LOG_LEVEL:-INFO}
+    volumes:
+      - aurion-data:/app/data
+      - aurion-logs:/app/logs
+    # Bounded so an unexpected memory climb restarts the container rather than invoking
+    # the host OOM killer on a 1-2 GB box.
+    deploy:
+      resources:
+        limits:
+          memory: 900M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/healthcheck.py"]
+      interval: 60s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  aurion-data:
+  aurion-logs:

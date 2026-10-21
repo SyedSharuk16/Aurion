@@ -6,27 +6,34 @@ no broker order endpoint is referenced anywhere in the design.
 
 ---
 
-## Status: Phase 1 approved; Phase 1.5 (power and capacity) delivered
+## Status: Phases 1-5 built. No validated edge. No live alerts.
 
 | Phase | Contents | State |
 |---|---|---|
 | 1 | Architecture, exact definitions, config surface, validation protocol, open questions | **Approved** |
-| 1.5 | Power, trial capacity, the module cut, pilot specification (`docs/07`, `tools/power.py`) | **Delivered — review required** |
-| 2 | Data adapters (OANDA v20 first), resampler, session engine, schema, tests | **Delivered** |
-| 2b | Macro daily series adapter (FRED), backfill supervisor, reconnect/gap repair | Next |
-| 2E | **Power pilot** (`docs/07` §5) — XAUUSD only, gates data purchase and trial budget | Exit gate on Phase 2 + 3a |
-| 3 | Analysis modules: `structure`, `ict`, `sr`, `regime` (Tier 1) and `quarterly`, `mmxm` (Tier 2, observational) + tests | Blocked |
-| 4 | Event-driven backtester, purged walk-forward, ablation, validation report | Blocked |
-| 5 | Signal engine, Telegram, always-on runtime, Docker/systemd | Blocked |
+| 1.5 | Power, trial capacity, the module cut, pilot specification (`docs/07`, `tools/power.py`) | **Approved with four conditions, all met** |
+| 2 | Data adapters (OANDA v20 first), resampler, session engine, schema, tests | **Built** |
+| 2b | Macro daily series adapter (FRED/ALFRED vintages), ingest supervisor, gap repair | **Built** |
+| 3 | Analysis modules: `structure`, `ict`, `sr`, `regime` (Tier 1) and `quarterly`, `mmxm` (Tier 2, observational) | **Built** |
+| 4 | Signal engine, event-driven backtester, purged walk-forward, ablation, validation report | **Built** |
+| 5 | Telegram outbox and commands, health channel, always-on runtime, Docker/systemd | **Built** |
+| 2E | **Power pilot** (`docs/07` §5) — XAUUSD only, on purchased M1 history | **Not run. Needs data.** |
 
-The pilot is deliberately placed *after* the data layer and a minimal analysis slice,
-because generating a single candidate requires the resampler plus structure, arrays and
-liquidity. It cannot precede Phase 2, and claiming otherwise would mean fabricating the
-trade count it exists to measure.
+"Built" means the code exists, is `mypy --strict` clean, and is covered by tests against
+synthetic fixtures. It does **not** mean the system has been shown to work. Everything that
+would make that claim — expectancy, the ablation, the deflated Sharpe, the walk-forward —
+requires real M1 history that has not been bought yet. Phase 2E is the next gate and it is a
+data purchase decision, not a coding task.
 
-Live alerts are gated behind Phase 4 passing its own acceptance criteria
-(`docs/04-validation-protocol.md` §8), and `[PAPER]`-tagged forward running for ≥4 weeks
-before the tag is removed.
+**The phase order differs from the original brief, deliberately.** The brief put the
+backtester in Phase 4 and the signal engine in Phase 5. The backtester replays the live
+signal engine (design commitment 2 below), so the engine must exist before the backtester
+can be written. Phase 4 here is `signals/` then `backtest/`; Phase 5 is delivery
+(`notify/`, `runtime/`, `deploy/`).
+
+Live alerts are gated behind the acceptance criteria in `docs/04-validation-protocol.md` §8
+and `aurion/backtest/report.py`, and `[PAPER]`-tagged forward running for >=4 weeks before
+the tag is removed. The tag is applied by the formatter, not by an operator's discretion.
 
 ---
 
@@ -46,7 +53,7 @@ before the tag is removed.
 
 ---
 
-## Running it (Phase 2)
+## Running it
 
 ```bash
 make install     # editable install with dev extras
@@ -55,8 +62,27 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: 153 tests, 92% branch coverage, `ruff` clean, `mypy --strict` clean.
-`analysis/primitives.py` is at 96%, above the 80% gate in `docs/04` §8.
+Current state: **408 tests**, `ruff` clean, `mypy --strict` clean on 83 source files.
+Branch coverage by package, because the aggregate hides the distribution:
+
+| Package | Coverage | |
+|---|---|---|
+| `analysis/` | **91%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
+| `core/` | 93% | |
+| `sessions/` | 92% | |
+| `data/` | 88% | |
+| `signals/` | 76% | `engine.py` 49%, `entries.py` 42% -- see below |
+| `backtest/` | 72% | |
+| `notify/` | 72% | |
+| `runtime/` | **15%** | `app.py` is the composition root: asyncio wiring, reconnect loops, signal handlers |
+| Total | 81% | |
+
+The two weak numbers are stated rather than papered over. `signals/engine.py` at 49% and
+`runtime/app.py` at 15% are both covered end-to-end by the backtest runner replaying M1
+through the real engine, but a unit-coverage counter does not see that, and unit tests for an
+asyncio composition root mostly assert that mocks were called. The honest reading is that the
+engine's *decision* logic is well covered and its *wiring* is not, and the wiring is what the
+Phase 2E pilot exercises first.
 
 What exists and is tested:
 
@@ -68,12 +94,23 @@ What exists and is tested:
 | `data/resample.py` | Incremental, O(1) per candle. Emits only at close, flags thin buckets, never emits empty ones |
 | `data/store.py` | SQLAlchemy 2.x async, idempotent upserts, gap detection, retention pruning, trial ledger |
 | `data/adapters/oanda.py` | Read-only, `price=BA`, drops incomplete candles, refuses any granularity above M1 |
+| `data/macro.py` | FRED/ALFRED **vintage** reads, so a regime conditioner never sees a revision published after `as_of` |
 | `sessions/` | Window algebra with per-window timezones, bucketed spread filter, point-in-time calendar, gates G1-G7 |
+| `analysis/` | Tier 1 (`structure`, `ict`, `sr`, `regime`) and Tier 2 (`quarterly`, `mmxm`, measured but sealed); `registry.py` memoises per bar close and refits KDE levels on D1 close only |
+| `signals/model.py` | L2 logistic + isotonic calibration in numpy; refuses to score on a mismatched feature schema or a training window that ends after `as_of`; hard-errors below 20 events per feature |
+| `signals/engine.py` | The cascade as a `Step` enum, so every rejection is attributable to one gate and the funnel is a measurement rather than a guess |
+| `signals/geometry.py` | R:R and stop construction; returns a named refusal (`no_target_at_min_rr`, `sl_below_min_atr`, `zero_risk`) instead of a silently degraded signal |
+| `backtest/runner.py` | Replays M1 through the live engine, one code path, with a `ledger_digest()` determinism check |
+| `backtest/ablation.py` | Pre-committed branch rule (A/B/C), Tier 1 arm order, and a SHA-256 `Tier2Seal` that makes reading Tier 2 before Tier 1 is committed a detectable event |
+| `backtest/report.py` | Acceptance criteria evaluated in code, including the 341-trade resolution floor, the tie-break share and the financing-materiality check |
+| `notify/telegram/` | MarkdownV2 escaping of all 18 reserved characters, outbox with a UNIQUE dedupe key written in the same transaction as the state change, token-bucket throttle with backoff and a dead-letter path |
+| `runtime/` | JSON logging with secret redaction, graceful shutdown, state rehydrated from the DB |
 | `tests/causality/` | T1 prefix invariance (on the gate decision), T2 future nulling, T3 time-translation equivariance, T4 resample boundary |
 
 The adapter protocol has **no order-submission method**, and a test asserts it
 (`test_adapter_protocol_has_no_order_methods`). Adding execution would require widening the
-protocol, which is a visible diff.
+protocol, which is a visible diff. The Telegram layer is send-only: it has no handler that
+can reach `signals/` or `data/`, and the only commands are read-only plus `/pause`.
 
 ## Design commitments
 
@@ -159,6 +196,18 @@ cannot be quietly revised afterwards.
   leak label information across the fold boundary.
 - The reported Sharpe is **deflated** for the number of effectively independent trials.
   Effective trial count is estimated, not assumed equal to the raw grid size.
+- **The emission rate — the single number the whole power analysis rests on — is still
+  unmeasured.** A full synthetic year on XAUUSD produced 26,879 evaluations and **zero
+  emitted signals**: 51.4% died at the HTF bias gate, 45.8% at the entry model, 2.8% at the
+  HTF array check. Two causes, only one of them fixable. The synthetic generator produces
+  drift and noise but not the sweep-then-displacement structure the entry models require, so
+  a zero there is close to expected. The other was a real defect: the runner never set
+  `silver_bullet_window_start`, which silently collapsed a two-entry-model design to one
+  across the entire run. That is fixed and pinned by a test. But every trade-count figure in
+  `docs/07` remains a projection from assumed frequencies, and the pilot's first obligation
+  is to replace it with a measurement. If the measured rate is materially below the base
+  case, the module cut in `docs/07` §7 tightens further, possibly to zero
+  selection-eligible modules.
 
 **Operational**
 
@@ -181,6 +230,19 @@ cannot be quietly revised afterwards.
 - Target hardware (1 vCPU / 1–2 GB) cannot hold the full M1 history and run backtests.
   The VPS carries a rolling window; backtesting is an offline activity
   (`docs/01-architecture.md` §8).
+- **A flat deployment emits nothing for roughly six months, by construction.** W1 structure
+  needs two confirmed fractal swings per side, and a W1 fractal is not confirmed until
+  `swing_half_width` weeks have closed on both sides of it. Until that exists the HTF bias
+  gate returns no bias and the cascade stops at step 1. This is a consequence of the swing
+  definition (`docs/02-definitions.md` §4.1), not a startup bug, and the only remedies are
+  backfilled history or a weaker bias definition — the second of which would be a parameter
+  change requiring a trial.
+- **Backtest throughput is ~5.7 seconds per instrument-week of M1** after optimisation
+  (down from 16s: suffix extrema for FVG fill tracking, bisected BPR pairing, one shared ATR
+  pass, KDE refit on D1 close only). A single-instrument five-year walk-forward is therefore
+  ~25 minutes of CPU, and the six-instrument grid is the cost that actually constrains how
+  many trials are affordable in wall-clock terms — separately from how many are affordable
+  statistically.
 
 **Mandatory disclaimer, emitted with every `/stats` response and every validation report:**
 
