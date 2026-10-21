@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from aurion.notify.telegram.formatters import escape
+from aurion.notify.telegram.formatters import code, escape
 
 
 class AlertKind(StrEnum):
@@ -50,7 +50,11 @@ class Alert:
     def render(self) -> str:
         emoji = _EMOJI.get(self.kind, "ℹ")
         label = escape(str(self.kind).replace("_", " ").upper())
-        return f"{emoji} *{label}*\n\n{escape(self.detail)}\n\n`{escape(self.at.isoformat())}`"
+        # `escape` for the prose detail, `code` for the timestamp: prose escaping inside
+        # a code span renders its backslashes literally and can make Telegram reject the
+        # message, which for a health alert means losing the message that explains an
+        # outage.
+        return f"{emoji} *{label}*\n\n{escape(self.detail)}\n\n{code(self.at.isoformat())}"
 
 
 @dataclass(slots=True)

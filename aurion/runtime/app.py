@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import signal
 import time
 from collections.abc import Mapping
@@ -540,14 +541,23 @@ _REQUIRED_ENV: tuple[tuple[str, str, bool], ...] = (
 )
 
 
+#: The v20 account ID shape, e.g. 101-001-1234567-001. Checked because this is a value
+#: people type by hand, and a transcription error produces an opaque 404 from the streaming
+#: endpoint that reads like a network fault rather than a typo. A warning rather than a
+#: refusal: the pattern is OANDA's convention, not something this code should bet a working
+#: deployment on being able to recognise forever.
+_ACCOUNT_ID = re.compile(r"^\d{3}-\d{3}-\d+-\d{3}$")
+
+
 @dataclass(frozen=True, slots=True)
 class PreflightFinding:
     variable: str
+    problem: str
     consequence: str
     fatal: bool
 
     def render(self) -> str:
-        return f"{self.variable} is unset or empty: {self.consequence}"
+        return f"{self.variable} {self.problem}: {self.consequence}"
 
 
 def preflight(env: Mapping[str, str], mode: str) -> list[PreflightFinding]:
@@ -557,11 +567,23 @@ def preflight(env: Mapping[str, str], mode: str) -> list[PreflightFinding]:
     testable without mutating the process environment.
     """
     outside_backtest = mode != "backtest"
-    return [
-        PreflightFinding(name, consequence, fatal and outside_backtest)
+    out = [
+        PreflightFinding(name, "is unset or empty", consequence, fatal and outside_backtest)
         for name, consequence, fatal in _REQUIRED_ENV
         if not env.get(name, "").strip()
     ]
+    account = env.get("AURION_OANDA_ACCOUNT_ID", "").strip()
+    if account and not _ACCOUNT_ID.match(account):
+        out.append(
+            PreflightFinding(
+                "AURION_OANDA_ACCOUNT_ID",
+                "does not look like an OANDA v20 account ID",
+                "expected four dash-separated groups such as 101-001-1234567-001; a typo "
+                "here returns 404 from the stream, which reads as a network fault",
+                False,
+            )
+        )
+    return out
 
 
 def build_app(config_path: str | Path | None = None) -> AurionApp:

@@ -44,7 +44,9 @@ from aurion.notify.telegram.commands import (
     unauthorised,
 )
 from aurion.notify.telegram.formatters import (
+    DEFAULT_REASONS,
     both_zones,
+    code,
     escape,
     format_rejection_digest,
     format_signal,
@@ -64,7 +66,12 @@ from aurion.sessions.gates import build_window_set
 from aurion.signals.engine import Candidate, Step
 from aurion.signals.entries import EntryModel
 from aurion.signals.geometry import Target, TargetKind, TradeGeometry
-from aurion.signals.lifecycle import LifecycleManager, SignalState, TrackedSignal
+from aurion.signals.lifecycle import (
+    LifecycleManager,
+    SignalState,
+    TrackedSignal,
+    Transition,
+)
 from aurion.signals.sizing import PositionSize
 from tests.conftest import bars_from, make_m1, zigzag
 from tests.unit.test_signals import CASCADE_PARAMS, MSS_DELTAS
@@ -83,9 +90,11 @@ def test_every_reserved_markdownv2_character_is_escaped():
 
 
 def test_price_uses_the_instruments_precision():
-    assert price(2318.4049, 0.01) == "2318\\.40"
-    assert price(1.1000049, 0.00001) == "1\\.10000"
-    assert price(150.123, 0.001) == "150\\.123"
+    """Plain numbers. These assertions previously expected `2318\\.40` -- prose escaping --
+    which is wrong in the code span every price is rendered inside."""
+    assert price(2318.4049, 0.01) == "2318.40"
+    assert price(1.1000049, 0.00001) == "1.10000"
+    assert price(150.123, 0.001) == "150.123"
 
 
 def test_both_timezones_are_shown():
@@ -127,7 +136,7 @@ def test_signal_message_reports_a_calibrated_probability_not_a_score():
     assert "PAPER" in text
     assert "Confidence" in text and "calibrated" in text
     assert "Brier" in text
-    assert "0\\.41" in text
+    assert "`0.41`" in text, "the probability is in a code span, so it is not prose-escaped"
     assert "TP1" in text and "TP2" in text
     assert "Expires" in text
 
@@ -164,7 +173,10 @@ def test_transition_message_reports_realised_r():
         signal, Transition(SignalState.TP1_HIT, T0, 2332.2, 1.04, "suggest break-even"),
         0.01,
     )
-    assert "TP1 HIT" in text and "1\\.04" in text and "break\\-even" in text
+    # `+1.04` sits in a code span (no prose escaping); the note is prose (escaped).
+    assert "TP1 HIT" in text
+    assert "`+1.04`" in text
+    assert "break\\-even" in text
 
 
 def test_rejection_digest_lists_counts():
@@ -536,7 +548,7 @@ def test_configure_is_idempotent():
 # -- startup preflight -------------------------------------------------------
 _FULL_ENV = {
     "AURION_OANDA_API_TOKEN": "t",
-    "AURION_OANDA_ACCOUNT_ID": "a",
+    "AURION_OANDA_ACCOUNT_ID": "101-001-1234567-001",
     "AURION_TELEGRAM_BOT_TOKEN": "b",
     "AURION_TELEGRAM_SIGNAL_CHAT_ID": "-100",
     "AURION_TELEGRAM_ADMIN_CHAT_ID": "-101",
@@ -578,8 +590,24 @@ def test_an_empty_allowlist_warns_but_does_not_block_startup():
 
 def test_every_finding_names_the_consequence_not_just_the_variable():
     for finding in preflight({}, "live_alerts"):
-        assert finding.render().startswith(finding.variable + " is unset or empty: ")
+        assert finding.render() == f"{finding.variable} {finding.problem}: {finding.consequence}"
         assert len(finding.consequence.split()) >= 4
+
+
+def test_a_mistyped_account_id_is_reported_rather_than_left_to_a_404():
+    """A hand-copied credential. The failure it causes reads as a network fault."""
+    env = {**_FULL_ENV, "AURION_OANDA_ACCOUNT_ID": "101-001-1234567"}
+    findings = preflight(env, "paper")
+    assert [f.variable for f in findings] == ["AURION_OANDA_ACCOUNT_ID"]
+    assert "does not look like" in findings[0].render()
+    # A warning, not a refusal: the pattern is OANDA's convention, and being wrong about it
+    # must not be able to block a working deployment.
+    assert not findings[0].fatal
+
+
+def test_a_well_formed_account_id_passes():
+    for good in ("101-001-1234567-001", "001-001-1234567-002", "102-004-999999999-010"):
+        assert preflight({**_FULL_ENV, "AURION_OANDA_ACCOUNT_ID": good}, "paper") == []
 
 
 # -- alert routing -----------------------------------------------------------
@@ -848,3 +876,164 @@ async def test_no_bars_means_no_chart_rather_than_an_exception(store, cfg, tmp_p
     app = _live_app(store, cfg, tmp_path)
     view = MarketView(app.repo, T0)
     assert await app._render_chart(_emitted_candidate(), view, "XAUUSD") is None
+
+
+# -- MarkdownV2 code-span escaping -------------------------------------------
+def _code_spans(text: str) -> list[str]:
+    """Contents of each single-backtick span, backtick-escapes excluded."""
+    out, i = [], 0
+    while True:
+        start = text.find("`", i)
+        if start == -1:
+            return out
+        end = start + 1
+        while end < len(text):
+            if text[end] == "\\":
+                end += 2
+                continue
+            if text[end] == "`":
+                break
+            end += 1
+        if end >= len(text):
+            return out
+        out.append(text[start + 1 : end])
+        i = end + 1
+
+
+def _assert_code_spans_clean(text: str, label: str) -> None:
+    """Inside a code entity Telegram requires every backslash to be escaped.
+
+    Prose escaping applied to a code span therefore renders the backslashes literally
+    (`2338\\.40`) and can make Telegram reject the entire message with "can't parse
+    entities" -- so this is a delivery failure, not a cosmetic one.
+    """
+    for span in _code_spans(text):
+        stripped = span.replace("\\\\", "").replace("\\`", "")
+        assert "\\" not in stripped, f"{label}: stray backslash in code span {span!r}"
+
+
+def test_code_escapes_only_what_a_code_entity_reserves():
+    assert code("2338.40") == "`2338.40`", "a dot needs no escaping inside a code span"
+    assert code("[PAPER]") == "`[PAPER]`"
+    assert code("a\\b") == "`a\\\\b`", "a backslash must be escaped inside a code span"
+    assert code("a`b") == "`a\\`b`"
+
+
+def test_price_returns_a_plain_number_for_the_caller_to_wrap():
+    assert price(2338.4, 0.01) == "2338.40"
+    assert price(1.08531, 0.00001) == "1.08531"
+
+
+def test_no_signal_alert_puts_prose_escaping_in_a_code_span():
+    candidate = _emitted_candidate()
+    for paper in (True, False):
+        for brier in (None, 0.24):
+            text = format_signal(candidate, 0.01, paper=paper, brier=brier)
+            _assert_code_spans_clean(text, f"format_signal paper={paper} brier={brier}")
+            assert "2305.00" in text, "the entry price must survive unescaped in its span"
+
+
+def test_no_transition_update_puts_prose_escaping_in_a_code_span():
+    tracked = TrackedSignal(
+        signal_id="sig-md",
+        instrument="XAUUSD",
+        direction=Direction.UP,
+        entry=2300.0,
+        stop_loss=2290.0,
+        targets=(2320.0,),
+        expires_at=T0 + timedelta(hours=4),
+        created_at=T0,
+    )
+    for state in (SignalState.TRIGGERED, SignalState.TP1_HIT, SignalState.SL_HIT):
+        transition = Transition(state, T0 + timedelta(minutes=5), 2310.0, "note with a . dot")
+        text = format_transition(tracked, transition, 0.01)
+        _assert_code_spans_clean(text, f"format_transition {state}")
+
+
+def test_no_command_response_puts_prose_escaping_in_a_code_span(ctx, cascade_snapshot):
+    full = _with(ctx, snapshots={"TEST": cascade_snapshot})
+    for label, text in (
+        ("status", status(full)),
+        ("stats", stats(full)),
+        ("sessions", sessions(full)),
+        ("levels", levels(full, "TEST")),
+        ("active", active(full, lambda _s: 2310.0)),
+        ("digest", format_rejection_digest({"bias:htf_structure_unavailable": 7}, 10)),
+    ):
+        _assert_code_spans_clean(text, label)
+
+
+#: Outside a code span these are never entity delimiters in any message this system sends
+#: (only `*`, `_`, `[`, `]`, `(`, `)` and the backtick are), so every one must be escaped.
+#: Telegram rejects the whole message otherwise -- a delivery failure, not a rendering one.
+_MUST_ESCAPE_IN_PROSE = ".+-=!#|{}~>"
+
+
+def _assert_prose_is_escaped(text: str, label: str) -> None:
+    in_code = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+            i += 1
+            continue
+        if not in_code and ch in _MUST_ESCAPE_IN_PROSE:
+            context = text[max(0, i - 25) : i + 10].replace("\n", " ")
+            raise AssertionError(f"{label}: unescaped {ch!r} in prose near ...{context}...")
+        i += 1
+
+
+def test_a_reason_line_does_not_put_a_raw_number_in_prose():
+    """The contribution used to be interpolated raw, so `+0.52` reached Telegram unescaped
+    and every alert carrying reasons would have been rejected outright."""
+    rendered = DEFAULT_REASONS.render("sweep_depth_atr", 0.52)
+    _assert_prose_is_escaped(rendered, "reason")
+    assert "`+0.52`" in rendered
+
+
+def test_every_message_this_system_sends_is_valid_markdown_v2(ctx, cascade_snapshot):
+    candidate = _emitted_candidate()
+    tracked = TrackedSignal(
+        signal_id="sig-md2",
+        instrument="XAUUSD",
+        direction=Direction.UP,
+        entry=2300.0,
+        stop_loss=2290.0,
+        targets=(2320.0,),
+        expires_at=T0 + timedelta(hours=4),
+        created_at=T0,
+    )
+    full = _with(ctx, snapshots={"TEST": cascade_snapshot}, active_signals=[tracked])
+    messages = {
+        "signal": format_signal(candidate, 0.01, paper=True, brier=0.24),
+        "signal_live": format_signal(candidate, 0.01, paper=False),
+        "transition": format_transition(
+            tracked, Transition(SignalState.TP1_HIT, T0, 2310.0, "note"), 0.01
+        ),
+        "digest": format_rejection_digest({"bias:htf_structure_unavailable": 7}, 10),
+        "status": status(full),
+        "stats": stats(full),
+        "sessions": sessions(full),
+        "levels": levels(full, "TEST"),
+        "active": active(full, lambda _s: 2310.0),
+        "pause": pause(full),
+        "resume": resume(full),
+        "unauthorised": unauthorised("99887766"),
+    }
+    for label, text in messages.items():
+        _assert_prose_is_escaped(text, label)
+        _assert_code_spans_clean(text, label)
+    monitor = HealthMonitor()
+    monitor.counters.record_rejection("bias:w1_d1_disagree")
+    monitor.counters.bars_ingested = 1440
+    for label, alert in (
+        ("heartbeat", monitor.heartbeat(T0, 36_000.0)),
+        ("determinism", monitor.determinism_mismatch("XAUUSD", "M15", T0)),
+        ("exception", monitor.exception("housekeeping", ValueError("a . dotted message"), T0)),
+    ):
+        _assert_prose_is_escaped(alert.render(), f"alert:{label}")
+        _assert_code_spans_clean(alert.render(), f"alert:{label}")

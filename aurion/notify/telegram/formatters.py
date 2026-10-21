@@ -26,6 +26,9 @@ SGT = ZoneInfo("Asia/Singapore")
 #: MarkdownV2 reserves all of these. Telegram rejects a message containing any unescaped.
 _RESERVED = r"_*[]()~`>#+-=|{}.!"
 
+#: Rendered inside a code span, where brackets need no escaping.
+_PAPER = "[PAPER]"
+
 _DIRECTION_EMOJI = {Direction.UP: "\U0001f7e2", Direction.DOWN: "\U0001f534"}
 
 _STATE_EMOJI = {
@@ -42,8 +45,30 @@ _STATE_EMOJI = {
 }
 
 
+def paper_tag(paper: bool) -> str:
+    """The `[PAPER]` marker, or nothing.
+
+    A function rather than a constant per module: `commands.py` kept its own copy and the
+    copy carried prose escaping inside a code span, so `/stats` rendered `\\[PAPER\\]`.
+    """
+    return f" {code(_PAPER)}" if paper else ""
+
+
+def code(value: object) -> str:
+    """Wrap a value in a MarkdownV2 code span, escaped by the rule for code entities.
+
+    A different rule from `escape`, and conflating the two is a bug rather than a style
+    point. Inside a code entity Telegram requires only a backslash and a backtick to be
+    escaped, and requires EVERY backslash to be escaped -- so prose-escaped text in a code
+    span renders its backslashes literally and can make Telegram reject the whole message
+    with "can't parse entities". That was every price in every alert.
+    """
+    inner = str(value).replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{inner}`"
+
+
 def escape(text: object) -> str:
-    """Escape every MarkdownV2 reserved character."""
+    """Escape every MarkdownV2 reserved character. For prose, never for a code span."""
     out = str(text)
     for ch in _RESERVED:
         out = out.replace(ch, f"\\{ch}")
@@ -58,9 +83,14 @@ def both_zones(at: datetime) -> str:
 
 
 def price(value: float, point: float) -> str:
-    """Format to the instrument's precision, derived from its point size."""
+    """Format to the instrument's precision, derived from its point size.
+
+    Returns the plain number: wrap it in `code` for a code span or `escape` for prose. It
+    cannot do both, and when it escaped unconditionally every price in a code span carried
+    a literal backslash.
+    """
     decimals = max(0, -1 * round(math.log10(point))) if point > 0 else 2
-    return escape(f"{value:.{decimals}f}")
+    return f"{value:.{decimals}f}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +106,11 @@ class ReasonText:
 
     def render(self, feature: str, contribution: float) -> str:
         label = self.mapping.get(feature, feature.replace("_", " "))
-        return f"{escape(label)} \\({contribution:+.2f} log\\-odds\\)"
+        # The contribution went in raw, so a reason line carried an unescaped `+` and
+        # `.` in prose -- both MarkdownV2-reserved, which makes Telegram reject the whole
+        # message. A code span rather than `escape` because it is a number: it reads
+        # better and cannot be under-escaped again.
+        return f"{escape(label)} \\({code(f'{contribution:+.2f}')} log\\-odds\\)"
 
 
 DEFAULT_REASONS = ReasonText(
@@ -120,21 +154,21 @@ def format_signal(
 
     emoji = _DIRECTION_EMOJI[candidate.direction]
     side = "LONG" if candidate.direction is Direction.UP else "SHORT"
-    tag = " `\\[PAPER\\]`" if paper else ""
+    tag = paper_tag(paper)
     risk = geometry.risk
 
     lines = [
         f"{emoji} *{escape(candidate.instrument)} — {side}*{tag}",
         "",
-        f"Entry  `{price(geometry.entry, point)}` "
+        f"Entry  {code(price(geometry.entry, point))} "
         f"\\({escape(candidate.proposal.entry_array_label if candidate.proposal else 'limit')}\\)",
-        f"SL     `{price(geometry.stop_loss, point)}`  "
-        f"\\({price(risk, point)} risk\\)",
+        f"SL     {code(price(geometry.stop_loss, point))}  "
+        f"\\({escape(price(risk, point))} risk\\)",
     ]
     for i, target in enumerate(geometry.targets, start=1):
         r_multiple = target.r_multiple(geometry.entry, geometry.stop_loss)
         lines.append(
-            f"TP{i}    `{price(target.price, point)}`  "
+            f"TP{i}    {code(price(target.price, point))}  "
             f"\\(R {escape(f'{r_multiple:.2f}')} · {escape(target.label)}\\)"
         )
 
@@ -142,19 +176,19 @@ def format_signal(
     if candidate.p_hat is not None:
         brier_text = f" · fold Brier {escape(f'{brier:.3f}')}" if brier is not None else ""
         lines.append(
-            f"Confidence  `{escape(f'{candidate.p_hat:.2f}')}` "
+            f"Confidence  {code(f'{candidate.p_hat:.2f}')} "
             f"\\(calibrated{brier_text}\\)"
         )
     if candidate.expected_r is not None:
-        lines.append(f"E\\[R\\]       `{escape(f'{candidate.expected_r:+.2f}')}`")
+        lines.append(f"E\\[R\\]       {code(f'{candidate.expected_r:+.2f}')}")
     if candidate.size is not None:
         if candidate.size.lots is None:
             lines.append(f"Size        {escape('size unavailable: ' + candidate.size.note)}")
         elif candidate.size.below_minimum:
-            lines.append(f"Size        `0\\.00` lots — {escape(candidate.size.note)}")
+            lines.append(f"Size        {code('0.00')} lots — {escape(candidate.size.note)}")
         else:
             lines.append(
-                f"Size        `{escape(f'{candidate.size.lots:.2f}')}` lots "
+                f"Size        {code(f'{candidate.size.lots:.2f}')} lots "
                 f"\\(risk {escape(f'{candidate.size.risk_amount:.0f}')}\\)"
             )
 
@@ -179,14 +213,14 @@ def format_transition(
 ) -> str:
     """A lifecycle update. One message per transition, deduped by state and revision."""
     emoji = _STATE_EMOJI.get(transition.state, "ℹ️")
-    tag = " `\\[PAPER\\]`" if paper else ""
+    tag = paper_tag(paper)
     side = "LONG" if signal.direction is Direction.UP else "SHORT"
     label = escape(str(transition.state).replace("_", " ").upper())
     lines = [
         f"{emoji} *{escape(signal.instrument)} {side} — {label}*{tag}",
         "",
-        f"at `{price(transition.price, point)}`",
-        f"realised  `{escape(f'{signal.realised_r:+.2f}')}` R",
+        f"at {code(price(transition.price, point))}",
+        f"realised  {code(f'{signal.realised_r:+.2f}')} R",
     ]
     if transition.note:
         lines.append(f"\n{escape(transition.note)}")
@@ -198,5 +232,5 @@ def format_rejection_digest(by_reason: dict[str, int], total: int) -> str:
     """Admin-channel funnel digest. Counts, because the counts are the point."""
     lines = [f"\U0001f4ca *Candidate funnel* — {total} evaluated", ""]
     for reason, n in sorted(by_reason.items(), key=lambda kv: -kv[1])[:10]:
-        lines.append(f" • `{escape(reason)}` {n}")
+        lines.append(f" • {code(reason)} {n}")
     return "\n".join(lines)

@@ -19,7 +19,7 @@ from aurion import BACKTEST_DISCLAIMER
 from aurion.analysis.base import Direction
 from aurion.analysis.registry import AnalysisSnapshot
 from aurion.backtest.metrics import breakout, trade_stats
-from aurion.notify.telegram.formatters import escape, price
+from aurion.notify.telegram.formatters import code, escape, paper_tag, price
 from aurion.sessions.windows import WindowSet
 from aurion.signals.lifecycle import TrackedSignal
 
@@ -31,7 +31,9 @@ PAUSE_KEY = "notify.paused"
 # MarkdownV2 fragments that need literal backslashes. Held as constants because Python 3.11
 # forbids a backslash inside an f-string expression, and inlining them is a syntax error.
 _NOT_PIT = " \\(not point\\-in\\-time\\)"
-_PAPER_TAG = " `\\[PAPER\\]`"
+#: One definition, from the formatter. The copy that used to live here carried prose
+#: escaping inside a code span, so it rendered its backslashes literally.
+_PAPER_TAG = paper_tag(True)
 _EQ = "\\="
 _SR_HEADER = "*S&R \\(strength is a model output, not a measurement\\)*"
 
@@ -88,12 +90,12 @@ def status(ctx: CommandContext) -> str:
     lines = [
         "\u2699\ufe0f *Status*",
         "",
-        f"adapter  `{escape(h.adapter)}` \u2014 "
+        f"adapter  {code(h.adapter)} \u2014 "
         f"{'connected' if h.connected else '*DISCONNECTED*'}",
         f"paused   `{h.paused}`",
-        f"uptime   `{escape(f'{h.uptime_s / 3600:.1f}')}` h",
-        f"model    `{escape(h.model_artifact_id or 'none')}`",
-        f"config   `{escape(h.config_hash)}` \u00b7 features v{h.feature_schema_version}",
+        f"uptime   {code(f'{h.uptime_s / 3600:.1f}')} h",
+        f"model    {code(h.model_artifact_id or 'none')}",
+        f"config   {code(h.config_hash)} \u00b7 features v{h.feature_schema_version}",
         f"calendar `{'available' if h.calendar_available else 'UNAVAILABLE'}`"
         + ("" if h.calendar_point_in_time else _NOT_PIT),
         "",
@@ -102,7 +104,7 @@ def status(ctx: CommandContext) -> str:
     for symbol in sorted(h.last_bar_age_s):
         age = h.last_bar_age_s[symbol]
         text = "no data" if age is None else f"{age:.0f}s"
-        lines.append(f" \u2022 `{escape(symbol)}` {escape(text)}")
+        lines.append(f" \u2022 {code(symbol)} {escape(text)}")
     active = {w.name for w in ctx.windows.active(ctx.now)}
     lines += ["", f"active windows  {escape(', '.join(sorted(active)) or 'none')}"]
     if not h.calendar_available:
@@ -128,11 +130,11 @@ def active(ctx: CommandContext, current_price: Callable[[str], float | None]) ->
             f"{signal.r_of(now_price):+.2f}" if now_price is not None else "n/a"
         )
         lines += [
-            f"*{escape(signal.instrument)} {side}* \u2014 `{escape(str(signal.state))}`",
-            f"  entry `{price(signal.entry, point)}` \u00b7 "
-            f"SL `{price(signal.effective_stop, point)}`",
-            f"  realised `{escape(f'{signal.realised_r:+.2f}')}`R \u00b7 "
-            f"unrealised `{escape(unrealised)}`R",
+            f"*{escape(signal.instrument)} {side}* \u2014 {code(str(signal.state))}",
+            f"  entry {code(price(signal.entry, point))} \u00b7 "
+            f"SL {code(price(signal.effective_stop, point))}",
+            f"  realised {code(f'{signal.realised_r:+.2f}')}R \u00b7 "
+            f"unrealised {code(unrealised)}R",
             "",
         ]
     return "\n".join(lines)
@@ -149,13 +151,13 @@ def stats(ctx: CommandContext) -> str:
         f"\U0001f4ca *Stats*{tag}",
         "",
         f"trades      `{st.n}`",
-        f"win rate    `{escape(f'{st.win_rate:.1%}')}`",
-        f"expectancy  `{escape(f'{st.expectancy:+.3f}')}`R",
-        f"avg win     `{escape(f'{st.avg_win:+.2f}')}`R \u00b7 "
-        f"avg loss `{escape(f'{st.avg_loss:+.2f}')}`R",
-        f"profit factor `{escape(f'{st.profit_factor:.2f}')}`",
-        f"max DD      `{escape(f'{st.max_drawdown_r:.1f}')}`R",
-        f"total       `{escape(f'{st.total_r:+.1f}')}`R",
+        f"win rate    {code(f'{st.win_rate:.1%}')}",
+        f"expectancy  {code(f'{st.expectancy:+.3f}')}R",
+        f"avg win     {code(f'{st.avg_win:+.2f}')}R \u00b7 "
+        f"avg loss {code(f'{st.avg_loss:+.2f}')}R",
+        f"profit factor {code(f'{st.profit_factor:.2f}')}",
+        f"max DD      {code(f'{st.max_drawdown_r:.1f}')}R",
+        f"total       {code(f'{st.total_r:+.1f}')}R",
     ]
     for label in ("session", "instrument", "weekday"):
         cells = breakout(
@@ -165,11 +167,11 @@ def stats(ctx: CommandContext) -> str:
         for cell in cells:
             if cell.stats is None:
                 lines.append(
-                    f" \u2022 `{escape(cell.key)}` n{_EQ}{cell.n} \u2014 {escape(cell.note)}"
+                    f" \u2022 {code(cell.key)} n{_EQ}{cell.n} \u2014 {escape(cell.note)}"
                 )
             else:
                 lines.append(
-                    f" \u2022 `{escape(cell.key)}` n{_EQ}{cell.n} "
+                    f" \u2022 {code(cell.key)} n{_EQ}{cell.n} "
                     f"E{_EQ}{escape(f'{cell.stats.expectancy:+.3f}')}R"
                 )
     lines += ["", f"_{escape(BACKTEST_DISCLAIMER)}_"]
@@ -185,7 +187,7 @@ def sessions(ctx: CommandContext) -> str:
         marker = "\u25b6" if window.contains(ctx.now) else " "
         emits = "signals" if window.emits_signals else "marking only"
         lines.append(
-            f"{marker} `{escape(name)}`  "
+            f"{marker} {code(name)}  "
             f"{escape(start.astimezone(NY).strftime('%H:%M'))}\u2013"
             f"{escape(end.astimezone(NY).strftime('%H:%M'))} NY  "
             f"\\({escape(start.astimezone(SGT).strftime('%H:%M'))}\u2013"
@@ -194,14 +196,14 @@ def sessions(ctx: CommandContext) -> str:
     lines += ["", "*Whitelists*"]
     for symbol in sorted(ctx.instruments):
         allowed = [w.name for w in ctx.windows.active_for(ctx.now, symbol)]
-        lines.append(f" \u2022 `{escape(symbol)}` {escape(', '.join(allowed) or 'none active')}")
+        lines.append(f" \u2022 {code(symbol)} {escape(', '.join(allowed) or 'none active')}")
     return "\n".join(lines)
 
 
 def levels(ctx: CommandContext, symbol: str) -> str:
     snapshot = ctx.snapshots.get(symbol)
     if snapshot is None:
-        return f"no snapshot for `{escape(symbol)}`"
+        return f"no snapshot for {code(symbol)}"
     point = ctx.points.get(symbol, 0.01)
     lines = [
         f"\U0001f4d0 *Levels \u2014 {escape(symbol)}* "
@@ -213,8 +215,8 @@ def levels(ctx: CommandContext, symbol: str) -> str:
         lines.append(_SR_HEADER)
         for level in sorted(snapshot.levels, key=lambda x: -x.strength)[:6]:
             lines.append(
-                f" \u2022 `{price(level.price, point)}` "
-                f"strength `{escape(f'{level.strength:.2f}')}` "
+                f" \u2022 {code(price(level.price, point))} "
+                f"strength {code(f'{level.strength:.2f}')} "
                 f"touches {level.touches}"
             )
     pools = [p for p in snapshot.pools if p.available]
@@ -222,7 +224,7 @@ def levels(ctx: CommandContext, symbol: str) -> str:
         lines += ["", "*Unswept pools*"]
         for pool in sorted(pools, key=lambda p: -p.touches)[:6]:
             lines.append(
-                f" \u2022 `{price(pool.level, point)}` {escape(str(pool.side))} "
+                f" \u2022 {code(price(pool.level, point))} {escape(str(pool.side))} "
                 f"\u00b7 {escape(str(pool.kind))} \u00b7 {pool.touches} touches"
             )
     swept = [p for p in snapshot.pools if not p.available]
@@ -233,9 +235,9 @@ def levels(ctx: CommandContext, symbol: str) -> str:
         lines += ["", "*Unmitigated FVGs*"]
         for fvg in sorted(arrays, key=lambda f: -f.confirmed_at.timestamp())[:6]:
             lines.append(
-                f" \u2022 `{price(fvg.lo, point)}`\u2013`{price(fvg.hi, point)}` "
+                f" \u2022 {code(price(fvg.lo, point))}\u2013{code(price(fvg.hi, point))} "
                 f"{escape(fvg.effective_direction.label)} \u00b7 "
-                f"fill `{escape(f'{fvg.fill_frac:.0%}')}`"
+                f"fill {code(f'{fvg.fill_frac:.0%}')}"
             )
     if snapshot.dealing_range is not None:
         dr = snapshot.dealing_range
@@ -243,9 +245,9 @@ def levels(ctx: CommandContext, symbol: str) -> str:
         position = dr.position(close) if close is not None else None
         lines += [
             "",
-            f"*Dealing range* `{price(dr.low, point)}`\u2013`{price(dr.high, point)}`",
-            f"  equilibrium `{price(dr.equilibrium, point)}`"
-            + (f" \u00b7 position `{escape(f'{position:.2f}')}`" if position is not None else ""),
+            f"*Dealing range* {code(price(dr.low, point))}\u2013{code(price(dr.high, point))}",
+            f"  equilibrium {code(price(dr.equilibrium, point))}"
+            + (f" \u00b7 position {code(f'{position:.2f}')}" if position is not None else ""),
         ]
     return "\n".join(lines)
 
@@ -264,4 +266,4 @@ def resume(ctx: CommandContext) -> str:
 
 
 def unauthorised(user_id: str) -> str:
-    return f"ignored command from unauthorised user `{escape(user_id)}`"
+    return f"ignored command from unauthorised user {code(user_id)}"
