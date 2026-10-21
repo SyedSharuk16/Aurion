@@ -1,0 +1,14 @@
+# Normalise to LF in the repository and in the working tree, on every platform.
+#
+# Without this, Git for Windows checks files out as CRLF by default
+# (core.autocrlf=true). That is harmless on Windows alone, but this project is routinely
+# cloned to a Windows path and then run from WSL, where the second Git installation uses a
+# different default and reports every tracked file as modified -- blocking `git pull` with a
+# list of files nobody edited. CRLF also breaks a shell script outright: the shebang parses
+# as `/usr/bin/env python3\r`, which does not exist.
+* text=auto eol=lf
+
+# Binary: never translated, never diffed as text.
+*.png binary
+*.parquet binary
+*.sqlite binary

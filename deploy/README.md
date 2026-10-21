@@ -49,6 +49,26 @@ crash-loop rather than a visible error.
 `AURION_CALENDAR_PATH=./data/calendar.json` therefore means the same thing inside the
 container and out, so one `.env` serves both.
 
+## If `git pull` refuses, listing files you never edited
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        aurion/runtime/app.py
+        tests/unit/test_notify.py
+```
+
+That is line endings, not your edits. Git for Windows checks out CRLF by default, and WSL's
+Git on the same working tree reports every file as modified. `.gitattributes` pins LF, so it
+resolves itself on a fresh clone; on an existing one:
+
+```bash
+git diff --ignore-all-space --stat     # empty output == only line endings differ
+git config core.autocrlf false
+git reset --hard && git pull
+```
+
+`git reset --hard` discards tracked-file changes only. `.env` is ignored, so it is untouched.
+
 ## Without Docker
 
 ```bash
