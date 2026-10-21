@@ -175,7 +175,7 @@ message**, then the calendar. The message is the only proof delivery works end t
 if it fails on `chat not found` the script tells you to send the bot `/start` — a bot cannot
 open a conversation with a user, so until you do that every send is refused.
 
-**It is a long-running service, not a periodic job.** It holds a price stream and evaluates
+**It is a long-running service, not a periodic job** (`deploy/README.md` has the server walkthrough). It holds a price stream and evaluates
 on bar close; a cron job would miss closes and reconnect constantly. `docker compose` with
 `restart: unless-stopped` plus the healthcheck, or `deploy/aurion.service` for systemd, is
 what keeps it up across crashes and reboots. Nothing needs to re-trigger it.

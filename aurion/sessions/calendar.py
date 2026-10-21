@@ -156,7 +156,15 @@ def load_calendar_events(path: str | Path) -> list[CalendarEvent]:
     that sets it equal to `scheduled_utc` is asserting the event was known at its own
     release instant, which is false for anything added or revised afterwards.
     """
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    file = Path(path)
+    if not file.is_file():
+        # A bare FileNotFoundError here reads as a bug. Under `restart: unless-stopped`
+        # it is also an endless crash-loop, so it names what is missing and why.
+        raise ValueError(
+            f"calendar file not found: {file}. news.fail_safe is 'block', so the gate "
+            "cannot be left unfed. Check AURION_CALENDAR_PATH."
+        )
+    raw = json.loads(file.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError(f"{path}: expected a JSON list of events, got {type(raw).__name__}")
     out: list[CalendarEvent] = []

@@ -23,15 +23,18 @@ RUN pip install --no-cache-dir .
 
 COPY config.yaml ./config.yaml
 COPY deploy/healthcheck.py ./deploy/healthcheck.py
+# The calendar template and its schema. compose bind-mounts the host's data/ over this
+# read-only; shipping it means a plain `docker run` still finds a loadable file.
+COPY data ./data
 
 # Run unprivileged. The process needs no root capability: it reads market data and sends
 # messages, and there is no execution surface to protect.
 RUN useradd --create-home --uid 10001 aurion \
- && mkdir -p /app/data /app/logs /app/reports \
+ && mkdir -p /app/state/charts /app/logs /app/reports \
  && chown -R aurion:aurion /app
 USER aurion
 
-VOLUME ["/app/data", "/app/logs"]
+VOLUME ["/app/state", "/app/logs"]
 
 HEALTHCHECK --interval=60s --timeout=15s --start-period=120s --retries=3 \
   CMD python /app/deploy/healthcheck.py || exit 1

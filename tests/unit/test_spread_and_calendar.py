@@ -205,3 +205,22 @@ def test_file_without_a_path_is_an_error_not_a_silent_fallback():
 def test_an_unimplemented_provider_name_is_refused():
     with pytest.raises(ValueError, match="not implemented"):
         calendar_from_env({"AURION_CALENDAR_PROVIDER": "tradingeconomics"})
+
+
+def test_a_missing_calendar_file_names_itself_rather_than_raising_filenotfound(tmp_path):
+    """Under `restart: unless-stopped` this is an endless crash-loop, so the message has to
+    say what is missing. The container shadowed its own data directory with a named volume
+    and this was the exception nobody could read."""
+    with pytest.raises(ValueError, match="calendar file not found"):
+        load_calendar_events(tmp_path / "absent.json")
+    with pytest.raises(ValueError, match="calendar file not found"):
+        calendar_from_env(
+            {"AURION_CALENDAR_PROVIDER": "file", "AURION_CALENDAR_PATH": str(tmp_path / "no.json")}
+        )
+
+
+def test_a_directory_is_not_a_calendar_file(tmp_path):
+    """Docker creates a directory when a bind-mounted file is absent on the host, which is
+    the shape this failure actually arrives in."""
+    with pytest.raises(ValueError, match="calendar file not found"):
+        load_calendar_events(tmp_path)

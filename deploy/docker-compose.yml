@@ -1,6 +1,11 @@
 # docker compose -f deploy/docker-compose.yml up -d
 #
 # Secrets come from .env only; config.yaml carries no secret and is baked into the image.
+#
+# NOTE: compose's env_file parser does NOT strip surrounding whitespace or trailing
+# `# comments`, while the runtime's own loader does and warns. So a .env that works with
+# `python -m aurion.runtime.app` can fail here. Put values straight after `=` and delete
+# trailing comments on any line you edit.
 services:
   aurion:
     build:
@@ -13,12 +18,21 @@ services:
       - ../.env
     environment:
       AURION_CONFIG_PATH: /app/config.yaml
-      AURION_DB_URL: sqlite+aiosqlite:////app/data/aurion.sqlite
+      # State lives in /app/state, NOT /app/data. They shared /app/data, so the named
+      # volume for the database shadowed the repo's data/ directory and the calendar file
+      # vanished inside the container -- which crash-loops under restart: unless-stopped.
+      AURION_DB_URL: sqlite+aiosqlite:////app/state/aurion.sqlite
       AURION_LOG_DIR: /app/logs
+      AURION_CHART_DIR: /app/state/charts
       AURION_LOG_LEVEL: ${AURION_LOG_LEVEL:-INFO}
     volumes:
-      - aurion-data:/app/data
+      # Durable state the container writes.
+      - aurion-state:/app/state
       - aurion-logs:/app/logs
+      # Operator-supplied config the container only reads. Bind-mounted so the calendar can
+      # be replaced without rebuilding, and read-only so the process cannot alter it. The
+      # path is identical to a non-Docker run, so one .env works for both.
+      - ../data:/app/data:ro
     # Bounded so an unexpected memory climb restarts the container rather than invoking
     # the host OOM killer on a 1-2 GB box.
     deploy:
@@ -38,5 +52,5 @@ services:
       retries: 3
 
 volumes:
-  aurion-data:
+  aurion-state:
   aurion-logs:
