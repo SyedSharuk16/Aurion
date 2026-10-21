@@ -669,11 +669,33 @@ def test_an_empty_view_is_rejected_rather_than_evaluated():
 
 
 # -- entry models ------------------------------------------------------------
-def _sb_fvg(as_of, offset_minutes: int, direction=Direction.DOWN, lo=90.0, hi=92.0):
+def _sb_fvg(as_of, offset_minutes: int, direction=Direction.DOWN, lo=90.0, hi=92.0, middle=40):
+    """`middle` is the middle-candle index and must be real.
+
+    It defaults to -1 on the dataclass, and the stop leg is sliced from it, so a sentinel
+    would put the stop on the oldest bar in the window. These tests passed on exactly that
+    before the model started refusing it.
+    """
     confirmed = as_of + timedelta(minutes=offset_minutes)
     return FVG(
-        "TEST", TimeFrame.M15, direction, lo, hi, 2.0, confirmed - timedelta(minutes=15), confirmed
+        "TEST",
+        TimeFrame.M15,
+        direction,
+        lo,
+        hi,
+        2.0,
+        confirmed - timedelta(minutes=15),
+        confirmed,
+        middle_index=middle,
     )
+
+
+def test_a_gap_with_no_middle_candle_index_is_refused_rather_than_mis_stopped():
+    """The sentinel is reachable for any FVG not built by `find_fvgs`."""
+    _, _, snapshot, as_of = _cascade_world()
+    snap = replace(snapshot, fvgs=[_sb_fvg(as_of, -15, middle=-1)])
+    window_start = as_of - timedelta(minutes=45)
+    assert propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start) is None
 
 
 def test_the_silver_bullet_model_takes_the_most_recent_gap_inside_the_window():

@@ -46,7 +46,7 @@ the tag is removed. The tag is applied by the formatter, not by an operator's di
 | `docs/03-signal-engine.md` | Top-down bias cascade, decision rule, signal lifecycle state machine, position sizing |
 | `docs/04-validation-protocol.md` | Backtest mechanics, cost model, walk-forward, ablation, power analysis, deflated Sharpe, Monte Carlo |
 | `docs/05-data-contracts.md` | Adapter interface, DB schema, feature store, Telegram outbox |
-| `docs/06-open-questions.md` | The 16 concepts that **cannot** be defined objectively and their testable substitutes; the 14 decisions (all resolved); pre-registered predictions with effect sizes |
+| `docs/06-open-questions.md` | The 17 concepts that **cannot** be defined objectively and their testable substitutes; the 14 decisions (all resolved); pre-registered predictions with effect sizes. **A17 is open and needs a decision before the pilot** |
 | `docs/07-power-and-capacity.md` | Derived trial budget, minimum detectable effects, the module cut, the pilot spec, and two corrections to Phase 1 |
 | `tools/power.py` | Runnable calculator behind every number in `docs/07` |
 | `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
@@ -198,6 +198,16 @@ cannot be quietly revised afterwards.
   firing on 5% of candidates needs a ~1.4R per-trade effect to be detected at the projected
   N. That is what removed MMXM from selection eligibility and mitigation blocks from the
   build entirely.
+- **Two ablation arms are not currently separable, which an ablation requires.** Three
+  liquidity features are marked required, and a vector missing a required feature cannot
+  emit, so "a sweep exists in the entry window" is a precondition for *every* signal --
+  including the Silver Bullet model, which is defined by a time window and carries no sweep
+  at all. Removing the liquidity arm would therefore change the Silver Bullet model's firing
+  rate, confounding both arms. On synthetic data this terminated 1.7% of post-warm-up
+  evaluations; on real data the share is unknown. `docs/06` A17 states the three resolutions
+  and why none of them is a code change I should make unilaterally: each one changes the
+  validation design. **This needs deciding before the pilot measures a firing rate the
+  design then has to live with.**
 - **Execution and cost assumptions are assumptions, not settings.** Stop-fill slippage,
   limit-fill priority, the per-leg bid/ask basis and news spread widening are all
   unverifiable without real fills. Every headline statistic is reported under conservative

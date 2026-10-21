@@ -101,7 +101,12 @@ def propose_sweep_mss_retrace(
     entry, label = _array_entry(array, fvg_level)
 
     leg = snapshot.bars[max(mss.sweep.penetration_index, 0) : mss.choch.bar_index + 1]
-    leg = leg or snapshot.bars[-2:]
+    if not leg:
+        # Unreachable while bar indices are snapshot-relative (the sweep precedes the CHoCH
+        # by construction), and a refusal rather than a fallback because the alternative was
+        # `leg or bars[-2:]`: a stop computed from two unrelated bars, with nothing in the
+        # funnel to say it happened. `docs/01` §3.4, the no-silent-default rule.
+        return None
     return EntryProposal(
         model=EntryModel.SWEEP_MSS_RETRACE,
         direction=bias,
@@ -143,9 +148,16 @@ def propose_silver_bullet_fvg(
     if not fresh:
         return None
     array = max(fresh, key=lambda f: f.confirmed_at)
+    if array.middle_index < 0:
+        # `FVG.middle_index` defaults to -1, and this leg is the stop basis: a gap carrying
+        # the sentinel would slice `bars[0:1]`, putting the stop on the OLDEST bar in the
+        # window. Reachable for any FVG not built by `find_fvgs`, so it is refused rather
+        # than silently mis-stopped.
+        return None
     entry, label = _array_entry(array, fvg_level)
     leg = snapshot.bars[max(array.middle_index - 1, 0) : array.middle_index + 2]
-    leg = leg or snapshot.bars[-2:]
+    if not leg:
+        return None
     return EntryProposal(
         model=EntryModel.SILVER_BULLET_FVG,
         direction=bias,

@@ -225,6 +225,48 @@ expectancy changes between them, the honest conclusion is that there is no demon
 
 ---
 
+### A17. Three liquidity features are required, which makes a sweep a de-facto global gate
+
+**Found while auditing Phase 4, not specified anywhere.** `sweep_depth_atr`,
+`bars_since_sweep` and `sweep_bars_to_reclaim` are marked `required` in the feature schema,
+and `features/build.py` populates them only when the entry snapshot contains at least one
+sweep. A vector missing a required feature cannot produce a signal (§3.4), so:
+
+> **If no sweep exists anywhere in the entry-timeframe window, no signal can be emitted by
+> any entry model, whatever else is true.**
+
+That is a gate. It is not declared as one in `docs/03`'s decision rule, it is not one of
+G1–G7, and it does not appear in the funnel as a gate rejection -- it appears as
+`warmup:sweep_depth_atr`, which reads as a warm-up problem rather than a structural
+precondition. In the synthetic year it terminated 246 of 16,811 post-warm-up evaluations.
+
+**Why this matters beyond tidiness.** The SILVER_BULLET_FVG model is defined by a *time
+window* and an FVG; it carries no sweep (`EntryProposal.sweep is None` by construction).
+It nonetheless inherits this precondition through the feature vector, so it can only fire in
+windows that happen to follow a sweep. That couples a Tier 2 entry model to the liquidity
+module, and the coupling runs the wrong way for the ablation: removing the liquidity arm
+would change the silver-bullet model's firing rate, confounding both arms. An ablation whose
+arms are not separable does not measure what it reports.
+
+**Three resolutions, and I am not choosing between them unilaterally** because each changes
+the validation design rather than the code:
+
+1. **Declare it.** Keep the features required and add "a confirmed sweep exists in the entry
+   window" to the decision rule as an explicit gate, counted in the funnel as a gate. Honest,
+   and it narrows the system to liquidity-driven setups by design. The silver-bullet model
+   then needs its definition amended to say so, or dropping.
+2. **Make the three optional** (`required=False`). The models decouple, and the fitted model
+   must then handle a missing-feature pattern that correlates with the entry model -- which
+   at the projected sample sizes is a missingness problem, not a free lunch.
+3. **Make them required only for the model that claims them.** Per-entry-model required
+   sets. The cleanest semantically and the most code, and it splits the feature schema
+   version by model, which the model-usability check would have to carry.
+
+**Pending.** The code is unchanged and the behaviour is as described above. Whichever is
+chosen, the measured difference is small in absolute terms (1.7% of post-warm-up
+evaluations on synthetic data) and unknown on real data, so this should be decided before
+the pilot measures a firing rate the design then has to live with.
+
 ## Part B — Decisions I need before Phase 2
 
 **Status: resolved on review.** Verdicts recorded below; the table retains the original
