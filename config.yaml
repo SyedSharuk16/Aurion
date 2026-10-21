@@ -341,13 +341,19 @@ validation:
   oos_primary: concat_walkforward   # [fixed] not the 12m holdout (docs/07 Correction 1)
   holdout_role: degradation_check   # [fixed] not a significance gate (docs/07 Correction 1)
   holdout_months: 12               # [fixed] untouched until the final test
-  wf_train_months: 24              # [prior]
-  wf_validate_months: 3            # [prior]
-  wf_test_months: 3                # [prior]
-  wf_step_months: 3                # [prior]
+  # Non-overlapping training windows: inflation 1.00, N_eff == nominal N.
+  # docs/07 §9 Correction 4 -- the former 24/3/3 gave 5.38x inflation and N_eff 51.
+  wf_train_months: 12              # [prior]
+  wf_test_months: 12               # [prior]
+  wf_step_months: 12               # [prior]
+  wf_calibration_tail_frac: 0.20   # [prior] last 20% of each train window, held out
+  ci_estimator: wider_of_block_and_fold_cluster   # [fixed] docs/07 §9
   embargo: max_label_horizon_plus_1_bar   # [fixed]
   min_oos_trades: 341              # [fixed] resolves a 0.20 R effect at f=0.5 (docs/07 §3)
   selection_exit_policy: all_out_tp1  # [fixed] ONE policy selects (Q9); both are reported
+  # docs/07 §10: determined from the pilot's P3/P5 BEFORE any arm runs, then frozen.
+  selection_branch: pending_pilot  # A_no_selection | B_partial | C_full | pending_pilot
+  tier2_sealed_dir: ./reports/sealed   # [fixed] docs/07 §12
   module_tiers:                    # the cut; docs/07 §7
     tier1_selection_eligible: [sessions, ict_arrays, liquidity, sr, regime]
     tier2_observational: [quarterly, mmxm, volume_proxy, silver_bullet]

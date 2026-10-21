@@ -395,3 +395,250 @@ pilot reports (§6).
 | `docs/02` §10.3 | Rewritten (Q7): daily real yields and true DXY are available free and are used as daily regime conditioners under honest names |
 | `docs/06` | Decisions marked resolved; A13 corrected; A16 added; Part C rewritten with effect sizes and falsification thresholds |
 | `config.yaml` | `max_tunable_params` → `max_trials`; `selectivity` ordinal replaces three tunables; mitigation blocks removed; yield/DXY conditioners added |
+
+---
+
+## 9. Review conditions, and two further errors of mine
+
+Your verification of §4 was correct on the PSR and DSR arithmetic. It checked the formulas,
+not the input I fed them, and the input was wrong twice.
+
+### Correction 3 — I used the wrong `T`
+
+§4 computed required Sharpe at `T = 1,260` OOS days, described as "5 years". But under the
+Phase 1 walk-forward (dev 48m, train 24m, test 3m, step 3m) the concatenated out-of-sample
+set is **24 months = 504 trading days**, not 1,260. The first 24 months are consumed by the
+initial training window; OOS is `folds × test = 8 × 3 = 24` months.
+
+At the correct `T`:
+
+```
+design                              T    2 trials  4 trials  8 trials  affordable @SR=1.0
+------------------------------------|-----|---------|---------|---------|------------------
+ORIGINAL  5y, train24/test3/step3   | 504 |    1.53 |    1.91 |    2.20 |        0
+REVISED   5y, train12/test12/step12 | 756 |    1.25 |    1.56 |    1.79 |        1
+REVISED  10y, train12/test12/step12 |2016 |    0.77 |    0.95 |    1.10 |        4
+```
+
+The original design needed an observed annualised Sharpe of **2.20** for 8 trials, not 1.39.
+It was further from feasible than I reported.
+
+### Correction 4 — the walk-forward design was wrong, and your "minor" point is not minor
+
+Scaling effective N correctly (nominal N scales with total **test months**, which my first
+table held fixed while varying the step) inverts the design:
+
+```
+train | step | folds | OOS mo | nominal N | inflation | N_eff | train window
+------|------|-------|--------|-----------|-----------|-------|-------------
+   24 |    3 |     8 |     24 |       276 |      5.38 |    51 | 1.00x  <- Phase 1
+   24 |    6 |     4 |     24 |       276 |      2.75 |   100 | 1.00x
+   24 |   12 |     2 |     24 |       276 |      1.50 |   184 | 1.00x
+   12 |    3 |    12 |     36 |       414 |      3.58 |   116 | 0.50x
+   12 |    6 |     6 |     36 |       414 |      1.83 |   226 | 0.50x
+   12 |   12 |     3 |     36 |       414 |      1.00 |   414 | 0.50x  <- adopted
+   36 |    3 |     4 |     12 |       138 |      3.58 |    39 | 1.50x
+```
+
+Two findings, both of which contradict the Phase 1 design:
+
+1. **A smaller step buys nothing.** It raises nominal N and the overlap inflation in
+   near-equal measure. Overlapping harder is not a way to manufacture sample size.
+2. **A shorter training window raises `N_eff` twice over** — more folds, so more of the dev
+   window becomes out-of-sample, *and* less overlap between those folds.
+
+**Adopted: train 12m / test 12m / step 12m.** Training windows are then non-overlapping, so
+the inflation is exactly 1.00 and `N_eff = nominal N`. Against Phase 1 this is **8× the
+effective sample size** (414 vs 51) and 50% more OOS months, for free.
+
+The only cost is half the training window. Training runs on *candidates*, not emitted
+trades, so 12 months supplies roughly 690–1,380 training events — **34 to 69 features** at
+the 20-events-per-feature floor. The floor is not binding, so the cost is close to zero.
+
+Ablation MDE at `f = 1.0`, 6 tests, using `N_eff`:
+
+```
+design                              N_eff | σ_d=0.6 | σ_d=1.0 | σ_d=1.5
+------------------------------------|------|---------|---------|--------
+ORIGINAL  5y                        |   51 |   0.292 |   0.487 |   0.731
+REVISED   5y                        |  414 |   0.103 |   0.171 |   0.257
+REVISED  10y                        | 1104 |   0.063 |   0.105 |   0.157
+```
+
+Nominal N remains an upper bound on independent evidence. The reported CI is the **wider**
+of a trade-level stationary block bootstrap and a fold-cluster bootstrap. The adjustment
+applies to fit-dependent statistics; for a paired-CRN ablation difference both arms share
+the same folds, so it largely cancels and the residual is estimated from the realised
+difference series rather than assumed. For the DSR, `T` counts daily observations and the
+relevant correction is return autocorrelation, not fold overlap.
+
+---
+
+## 10. Condition 1 — the C3 branch, pre-committed
+
+You were right that this was the one place the document had not absorbed its own argument:
+I pre-registered the selection apparatus as unusable and then kept building it. The branch
+is now a commitment, evaluated once on the pilot's measured `P3` (baseline Sharpe) and `P5`
+(trial correlation), before any ablation arm is run.
+
+```
+affordable := max_trials(T = concat OOS days, SR_ann = P3, √V = P5)       (§4)
+```
+
+| Branch | Condition | What happens |
+|---|---|---|
+| **A — no selection** | `affordable ≤ 2` | The ablation is **not run as selection.** Ship the base model with all five Tier-1 groups enabled on prior plausibility. The ablation is run once, reported descriptively with CIs, and the report states in its header: *no module was selected on evidence; inclusion rests on prior plausibility.* No arm is switched on or off by its result. |
+| **B — partial** | `3 ≤ affordable ≤ 5` | Selection runs on the `affordable − 1` arms with the largest predicted effects, named **in advance** in the order: sessions, liquidity, ICT arrays, regime, S&R. The remainder are descriptive, in branch-A terms. |
+| **C — full** | `affordable ≥ 6` | Selection runs on all five arms plus the `selectivity` dimension, as `docs/04` §4 specifies. |
+
+Rules binding all three branches:
+
+- The branch is determined by `P3` and `P5` **before** any arm's result is computed, and the
+  determination is written to the trial ledger with a timestamp.
+- Under branch A, running the ablation and then enabling the winner is forbidden. One arm
+  wins on noise at these sample sizes, and a prior-plausibility decision would be
+  retroactively dressed as a result — the exact failure Part A exists to prevent.
+- Under branch A the honest description of the deliverable is: **one model, zero validated
+  modules.** That is a finding about the strategy space, not a build failure, and it is
+  stated as the report's headline rather than buried.
+- The branch cannot be re-evaluated after seeing results. If `P3` later improves because
+  more data was bought, the whole validation re-runs from a fresh branch determination — it
+  is not upgraded in place.
+
+Given §9's corrections, the predicted branch is now design-dependent: original design →
+**A** (0–1 trials); revised 5y → **A** (1 trial); revised 10y → **B** (4 trials, 3 arms).
+Which makes the data decision in §11 the decisive one.
+
+---
+
+## 11. Condition 2 — lever elasticity, and why rr_min goes last
+
+You asked for the elasticity and predicted that `rr_min` dominates. It does not. On these
+numbers it is the **weakest** of the four levers, and it is the only one whose effect on
+expectancy has an ambiguous sign.
+
+```
+lever                     | N mult | trial cost | money/time | effect on the Sharpe bar
+--------------------------|--------|------------|------------|-------------------------
+walk-forward redesign (§9)|  8.1x  | 0          | none       | lowers it (T 504 -> 756)
+history 5y -> 10y         |  2.7x  | 0          | money      | lowers it (1.79 -> 1.10)
+instruments 6 -> 12       |  2.0x  | 0          | adapter work, worse spreads | none
+drop W1/D1 concordance    |  1.82x | +1         | none       | raises it
+rr_min 2.0 -> 1.5         |  1.41x | +1         | none       | raises it
+```
+
+`P(target at ≥ rr)` under an assumed exponential tail, and the arithmetic that makes
+`rr_min` ambiguous:
+
+```
+rr  | p(target) | N mult vs rr=2 | break-even p̂ at R1=rr
+----|-----------|----------------|----------------------
+1.5 |     0.707 |          1.41  |                0.400
+2.0 |     0.500 |          1.00  |                0.333
+2.5 |     0.354 |          0.71  |                0.286
+3.0 |     0.250 |          0.50  |                0.250
+```
+
+The emission gate is `E[R] = p̂·R1 − (1 − p̂)`. Lowering the floor to 1.5 admits 41% more
+candidates past the R:R test and simultaneously raises the break-even win rate from 0.333 to
+0.400, so **fewer** of them clear the expectancy gate. Net sign on trade count: positive.
+Net sign on expectancy: not predictable a priori. Your original prediction #9 — that
+relaxing `rr_min` improves expectancy — is not supported by the mechanics; it is a genuine
+empirical question, and it is one the pilot answers for free.
+
+**Recommended order, which differs from your condition:**
+
+1. **Walk-forward redesign.** Free, no trials, 8× effective N, and it lowers the Sharpe bar.
+   Already adopted in §9 — this is not a decision, it was a defect.
+2. **Decide on history.** Zero trial cost, and it is the only lever that both multiplies N
+   and lowers the required Sharpe (1.79 → 1.10 at 8 trials). It is what moves the C3 branch
+   from A to B. The pilot sizes it by the §6 rule.
+3. **Instruments**, if more N is still needed. Zero trial cost; costs adapter work and
+   accepts worse spreads on minors.
+4. **`rr_min` last**, and only as a measurement. The pilot records the full achievable-R
+   ladder per candidate, which yields the exact `p(target ≥ rr)` CDF and the realised
+   expectancy at every floor from one backtest pass. Reading that curve costs nothing;
+   *choosing* a floor from it costs one trial. So it is measured first and decided last.
+
+The exponential tail above is an assumed functional form and the one number in this section
+I would least defend. It is replaced by the measured CDF at pilot time, which is precisely
+why nothing is bought before the pilot reports.
+
+---
+
+## 12. Condition 3 — Tier 2 sealing protocol
+
+You are right that "costs no trial budget" is false unless the measurement is sealed. Four
+unaccounted trials against a budget of 2–5 would roughly double the trial count.
+
+```
+Phase 4 execution order, enforced by the runner and not by discipline:
+
+  1. Branch determination from P3, P5          -> written to trial ledger, timestamped
+  2. Tier 1 runs (per the branch from §10)
+  3. Tier 1 OOS result COMMITTED               -> SHA-256 of the result file recorded in
+                                                  the ledger; the file becomes read-only
+  4. Tier 2 measured                           -> written to reports/sealed/tier2_<sha>.json
+  5. Tier 2 opened and read                    -> only now, and the ledger records the
+                                                  unseal timestamp
+```
+
+Mechanics:
+
+- The Tier 2 runner writes its output to `reports/sealed/` and **returns nothing to stdout,
+  the logs, or the report**. Its contents are not readable by the Tier 1 code path.
+- The seal is a recorded hash of the committed Tier 1 result plus a refusal: the unseal tool
+  exits non-zero if the Tier 1 result file's hash does not match the one in the ledger, so
+  Tier 1 cannot be revised after Tier 2 is known.
+- The unseal timestamp is in the ledger and printed in the validation report, so the ordering
+  is auditable by a reader who does not trust me.
+- If any Tier 2 number is read before step 3 — by accident, by a debugging session, by
+  anything — the four Tier 2 arms **fold into the trial count** and the branch in §10 is
+  re-determined with `affordable` reduced by 4. That is recorded as a protocol breach in the
+  report rather than quietly absorbed.
+
+This costs nothing when followed and is self-reporting when not, which is the only kind of
+protocol worth writing down.
+
+---
+
+## 13. Condition 4 — σ_d promoted to P1
+
+`σ_d` spans 0.6–1.5, swings the MDE by 2.5×, and alone determines whether the ablation can
+resolve anything. It was P4. It is now **P1**, and it is bounded before any module is built.
+
+Revised pilot output order:
+
+| # | Quantity | When |
+|---|---|---|
+| **P1** | `σ_d` bound for feature-group ablation, plus `f` per group | **Earliest possible.** Requires only the base model's trade-return distribution and an affected-fraction estimate; no module needs to exist |
+| P2 | Candidates and completed trades per instrument-year, full rejection funnel, achievable-R ladder per candidate | same pass |
+| P3 | Baseline annualised Sharpe on the concatenated OOS, with `γ̂₃`, `γ̂₄` | same pass |
+| P4 | Per-trade R dispersion `σ_R` | same pass |
+| P5 | Trial-return correlation → measured `√(V[ŜR_n])` | after ≥2 trials exist |
+
+**Early bound on `σ_d`, computable from the base model alone.** A feature-group ablation
+changes a candidate's outcome only when it moves `p̂` across the emission threshold. For the
+affected candidates the outcome flips between "trade taken" and "no trade", or between two
+different TP ladders, so the paired difference is approximately the difference of two draws
+from the realised R distribution restricted to near-threshold candidates:
+
+```
+σ_d ≈ √2 · σ_R|near-threshold
+```
+with `σ_R|near-threshold` estimated from the base model's realised R among candidates whose
+`E[R]` lies within a band of the gate. If that comes back near 1.0, then `σ_d ≈ 1.4` and the
+revised 5-year design resolves nothing below 0.24R — which is known **before** five arms are
+built, which is the whole point of the promotion.
+
+The approximation assumes the flip is between two independent draws; correlated outcomes
+(the same market path, differing only in entry) make the true `σ_d` smaller, so the bound is
+conservative in the right direction.
+
+### Gate on Phase 3
+
+If the early `σ_d` bound puts the MDE above 0.25R under the adopted design and whatever
+history has been acquired, Tier 1 is built as a **model**, not as five selection arms: the
+feature groups ship enabled, the ablation is descriptive per branch A, and no arm-level
+apparatus is constructed. Building a five-arm selection rig that is pre-registered as
+unusable is the error you caught, and this is the gate that prevents its recurrence.

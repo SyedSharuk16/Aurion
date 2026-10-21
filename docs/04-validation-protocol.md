@@ -112,8 +112,19 @@ Final holdout:  the most recent 12 months — UNTOUCHED until the single final t
 Development:    everything before the holdout
 
 Within development: rolling walk-forward
-    train 24 months -> validate 3 months -> test 3 months, step 3 months
+    train 12 months -> test 12 months, step 12 months
 ```
+
+**Revised after the overlap analysis (`docs/07` §9, Correction 4).** The Phase 1 design
+(train 24m / test 3m / step 3m) gave 8 folds sharing 87.5% of their training data, a
+variance inflation of 5.38× and an effective N of **51** from a nominal 276. Training
+windows are now non-overlapping, so the inflation is exactly 1.00, `N_eff = nominal N`, and
+more of the development window becomes out-of-sample: **414 effective trades instead of 51,
+and 36 OOS months instead of 24.** A smaller step was buying nominal N and inflation in
+equal measure, which is to say nothing at all.
+
+Calibration (isotonic) is fitted on the last 20% of each training window, held out from the
+model fit, since there is no longer a separate validate block.
 The validate block is where calibration (isotonic) and any hyperparameter choice happen;
 the test block is scored and never fitted.
 

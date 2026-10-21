@@ -189,6 +189,174 @@ class Funnel:
 
 
 # --------------------------------------------------------------------------
+# Walk-forward fold overlap -> effective N
+# --------------------------------------------------------------------------
+def fold_overlap_inflation(n_folds: int, train_months: int, step_months: int) -> float:
+    """Variance inflation for a statistic averaged over OVERLAPPING walk-forward folds.
+
+    Adjacent folds share (train - j*step)/train of their training data, so their
+    performance estimates are correlated. For a mean of m correlated observations:
+
+        Var(mean) = (sigma^2 / m) * [ 1 + 2 * sum_j (1 - j/m) * rho_j ]
+
+    with rho_j taken as the training-window overlap fraction -- full transmission of
+    overlap into estimate correlation, the conservative end.
+
+    Applies to statistics that depend on the FITTING PROCEDURE (expectancy of the refit
+    strategy, fold-level Sharpe). It does NOT apply to a paired-CRN ablation difference,
+    where both arms share the same folds and the overlap largely cancels; there the
+    inflation is estimated from the realised difference series instead.
+    """
+    j_max = min(n_folds - 1, math.ceil(train_months / step_months) - 1)
+    acc = sum(
+        (1.0 - j / n_folds) * max(0.0, 1.0 - j * step_months / train_months)
+        for j in range(1, j_max + 1)
+    )
+    return 1.0 + 2.0 * acc
+
+
+def n_folds_available(dev_months: int, train_months: int, test_months: int, step_months: int) -> int:
+    span = dev_months - train_months - test_months
+    return 0 if span < 0 else span // step_months + 1
+
+
+# --------------------------------------------------------------------------
+# Funnel lever elasticity
+# --------------------------------------------------------------------------
+def p_target_at_rr(rr: float, p_at_2: float = 0.50) -> float:
+    """P(a valid target exists at >= rr R) under an exponential tail.
+
+    Calibrated so p(2.0) = p_at_2, i.e. p(rr) = exp(-lam*(rr-1)) with lam = -ln(p_at_2).
+    ASSUMED FUNCTIONAL FORM. The pilot measures the achievable-R CDF directly by recording
+    the full target ladder per candidate, which replaces this with the exact curve at no
+    extra cost and no extra trial.
+    """
+    lam = -math.log(p_at_2)
+    return min(1.0, math.exp(-lam * (rr - 1.0)))
+
+
+def table_levers(base_n: float, oos_days: int, dsr_target: float, trials: int) -> str:
+    base = Funnel()
+    rr_mult = p_target_at_rr(1.5) / p_target_at_rr(2.0)
+    bias_mult = 1.0 / base.p_htf_bias_agrees
+    out = [
+        "LEVER ELASTICITY - multiplier on out-of-sample trade count",
+        f"  baseline N={base_n:.0f}, T={oos_days} OOS days, {trials} trials"
+        f" -> required SR_ann {required_annual_sharpe(trials, oos_days, 1.0, dsr_target):.2f}",
+        "",
+        "  lever                           | N mult | new N | trial cost | money/time cost",
+        "  --------------------------------|--------|-------|------------|-----------------",
+    ]
+    rows = [
+        ("rr_min 2.0 -> 1.5", rr_mult, "+1", "none"),
+        ("drop W1/D1 concordance", bias_mult, "+1", "none"),
+        ("instruments 6 -> 12", 2.0, "0", "adapter work, worse spreads"),
+        ("history 5y -> 10y", 2.25, "0 (raises budget)", "money + calendar"),
+    ]
+    for name, mult, tcost, cost in rows:
+        out.append(
+            f"  {name:<31} | {mult:>6.2f} | {base_n * mult:>5.0f} | {tcost:<10} | {cost}"
+        )
+    combined = rr_mult * bias_mult * 2.0 * 2.25
+    out.append(
+        f"  {'all four together':<31} | {combined:>6.2f} | {base_n * combined:>5.0f} |"
+        f" {'+2':<10} | money + calendar"
+    )
+    out += [
+        "",
+        "  Asymmetry that matters: more DATA costs money but ZERO trials, and RAISES the",
+        "  affordable trial count by increasing T. Loosening a GATE costs a trial but no",
+        "  money. They are not interchangeable levers.",
+        "",
+        "  required SR_ann at a fixed trial count, by OOS length:",
+        "    OOS days  | trials=2 | trials=4 | trials=8 | trials=16",
+        "    ----------|----------|----------|----------|----------",
+    ]
+    for t, lbl in ((1260, "1260 (5y)"), (1764, "1764 (7y)"), (2268, "2268 (9y)")):
+        cells = " | ".join(
+            f"{required_annual_sharpe(n, t, 1.0, dsr_target):>8.2f}" for n in (2, 4, 8, 16)
+        )
+        out.append(f"    {lbl:<9} | {cells}")
+    out += [
+        "",
+        "  P(target at >= rr), assumed exponential tail:",
+        "    rr  | p      | N mult vs rr=2 | break-even p_hat at R1=rr",
+        "    ----|--------|----------------|--------------------------",
+    ]
+    for rr in (1.5, 2.0, 2.5, 3.0):
+        p = p_target_at_rr(rr)
+        out.append(f"    {rr:<3} | {p:>6.3f} | {p / 0.5:>14.2f} | {1.0 / (1.0 + rr):>25.3f}")
+    out += [
+        "",
+        "  CAUTION on rr_min, and it cuts against prediction #9. Lowering the floor raises",
+        "  N by ~1.41x but lowers R1, while the emission gate is E[R] = p*R1 - (1-p). The",
+        "  break-even win rate rises from 0.333 at R1=2.0 to 0.400 at R1=1.5. More",
+        "  candidates clear the R:R floor and FEWER clear the expectancy gate. Net sign on",
+        "  trade count is positive; net sign on expectancy is NOT predictable a priori.",
+    ]
+    return "\n".join(out)
+
+
+def table_effective_n(
+    trades_per_oos_month: float, dev_months: int = 48, baseline_train: int = 24
+) -> str:
+    """Effective N over the walk-forward design grid.
+
+    CORRECTED: nominal N scales with total test months (folds x step, when test = step so
+    the test blocks tile contiguously), so it cannot be held fixed while the step varies.
+    Overlapping more does not buy effective sample size -- the inflation eats the gain.
+    """
+    out = [
+        "EFFECTIVE N over the walk-forward design grid",
+        f"  dev window {dev_months}m; test = step so OOS blocks tile contiguously;",
+        f"  {trades_per_oos_month:.1f} trades per OOS month (from the base-case projection)",
+        "",
+        "  train | step | folds | OOS mo | nominal N | inflation | N_eff | train events",
+        "  ------|------|-------|--------|-----------|-----------|-------|-------------",
+    ]
+    rows = []
+    for train in (12, 18, 24, 36):
+        for step in (3, 6, 12):
+            m = n_folds_available(dev_months, train, step, step)
+            if m < 2:
+                continue
+            oos_months = m * step
+            nominal = oos_months * trades_per_oos_month
+            infl = fold_overlap_inflation(m, train, step)
+            n_eff = nominal / infl
+            rel_events = train / baseline_train
+            rows.append((train, step, m, oos_months, nominal, infl, n_eff, rel_events))
+            out.append(
+                f"  {train:>5} | {step:>4} | {m:>5} | {oos_months:>6} | {nominal:>9.0f} |"
+                f" {infl:>9.2f} | {n_eff:>5.0f} | {rel_events:>11.2f}x"
+            )
+    best = max(rows, key=lambda r: r[6])
+    out += [
+        "",
+        f"  Highest N_eff: train={best[0]}m, step={best[1]}m -> N_eff {best[6]:.0f}"
+        f" (vs {[r for r in rows if r[0] == 24 and r[1] == 3][0][6]:.0f} at train=24m/step=3m)",
+        "",
+        "  Two things this shows that the original design got wrong:",
+        "   1. A SHORTER training window raises N_eff twice over - more folds (so more OOS",
+        "      months) and less overlap between them. It costs training events, which trades",
+        "      against the 20-events-per-feature floor.",
+        "   2. A SMALLER step does NOT raise N_eff. It raises nominal N and the inflation in",
+        "      near-equal measure. Overlapping harder buys nothing.",
+        "",
+        "  Scope of the adjustment: it applies to FIT-DEPENDENT statistics (expectancy of",
+        "  the refit strategy, fold-level Sharpe). For a paired-CRN ablation difference both",
+        "  arms share the same folds and the same overlap, so it largely cancels and the",
+        "  residual is estimated from the realised difference series. For the DSR, T is a",
+        "  count of daily observations and the relevant correction is return autocorrelation,",
+        "  not fold overlap.",
+        "",
+        "  Reported CI = the WIDER of a trade-level stationary block bootstrap and a",
+        "  fold-cluster bootstrap. Nominal N is an UPPER BOUND on independent evidence.",
+    ]
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
 # Tables
 # --------------------------------------------------------------------------
 def table_mde(sigma_r: float, sigma_d: float, affected_fracs: tuple[float, ...], n_tests: int) -> str:
@@ -335,6 +503,10 @@ def main() -> None:
     print(table_required_sharpe(a.oos_days, a.v_ratio, a.dsr_target))
     print()
     print(table_trades(a.instruments, a.years))
+    print()
+    print(table_levers(a.capacity_n, a.oos_days, a.dsr_target, 8))
+    print()
+    print(table_effective_n(a.capacity_n / 24.0))
     print()
     print(
         table_capacity(
