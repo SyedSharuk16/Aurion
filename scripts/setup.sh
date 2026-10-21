@@ -18,6 +18,14 @@ step() { printf '\n%s\n' "$1"; }
 START=false
 [ "${1:-}" = "--start" ] && START=true
 
+# Windows ships Python as `python`, Linux and macOS as `python3`. Git Bash runs this script
+# fine but inherits the Windows name, so the command is detected rather than assumed.
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else die "no python on PATH. Install Python 3.11+ and re-run."
+fi
+command -v curl >/dev/null 2>&1 || die "no curl on PATH."
+
 # -- 1. environment file -----------------------------------------------------
 step "1/6  environment file"
 [ -f .env ] || die ".env not found. Run: cp .env.example .env  then fill it in."
@@ -30,14 +38,14 @@ step "2/6  OANDA account"
 [ -n "${AURION_OANDA_API_TOKEN:-}" ] || die "AURION_OANDA_API_TOKEN is empty in .env"
 if [ -z "${AURION_OANDA_ACCOUNT_ID:-}" ]; then
   warn "AURION_OANDA_ACCOUNT_ID is empty; discovering it"
-  python3 tools/oanda_whoami.py || die "could not discover the account. See the output above."
+  "$PY" tools/oanda_whoami.py || die "could not discover the account. See the output above."
   die "paste those two lines into .env and re-run this script"
 fi
 ok "account ${AURION_OANDA_ACCOUNT_ID} (${AURION_OANDA_ENV:-practice})"
 
 # -- 3. preflight ------------------------------------------------------------
 step "3/6  preflight"
-python3 - <<'PY' || die "preflight found a fatal problem (above). Fix .env and re-run."
+"$PY" - <<'PY' || die "preflight found a fatal problem (above). Fix .env and re-run."
 import os, sys
 from aurion.config.models import load_config
 from aurion.runtime.app import preflight
@@ -52,7 +60,7 @@ ok "every required variable is set"
 step "4/6  Telegram bot"
 me=$(curl -sS --max-time 20 "https://api.telegram.org/bot${AURION_TELEGRAM_BOT_TOKEN}/getMe") \
   || die "cannot reach api.telegram.org. Check the network/firewall on this box."
-python3 - "$me" <<'PY' || die "getMe failed. The bot token is wrong or revoked."
+"$PY" - "$me" <<'PY' || die "getMe failed. The bot token is wrong or revoked."
 import json, sys
 d = json.loads(sys.argv[1])
 if not d.get("ok"):
@@ -68,7 +76,7 @@ body=$(curl -sS --max-time 20 \
   --data-urlencode "chat_id=${AURION_TELEGRAM_SIGNAL_CHAT_ID}" \
   --data-urlencode "text=Aurion setup check. Delivery works. No signals yet: history is still backfilling." \
   "https://api.telegram.org/bot${AURION_TELEGRAM_BOT_TOKEN}/sendMessage") || die "send failed"
-python3 - "$body" <<'PY' || die "delivery failed -- see the reason above"
+"$PY" - "$body" <<'PY' || die "delivery failed -- see the reason above"
 import json, sys
 d = json.loads(sys.argv[1])
 if d.get("ok"):
@@ -93,7 +101,7 @@ case "${AURION_CALENDAR_PROVIDER:-}" in
       warn "pointed at the TEMPLATE. Its dates are invented, so the news gate will block"
       warn "the wrong minutes. Replace it before you act on an alert (see data/README.md)."
     else
-      n=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "${AURION_CALENDAR_PATH}")
+      n=$("$PY" -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "${AURION_CALENDAR_PATH}")
       ok "${n} events loaded from ${AURION_CALENDAR_PATH}"
     fi ;;
   ""|none)
@@ -110,7 +118,7 @@ if [ "$START" = true ]; then
     exec docker compose -f deploy/docker-compose.yml up -d --build
   fi
   echo "docker compose not available; starting in the foreground instead."
-  exec python3 -m aurion.runtime.app
+  exec "$PY" -m aurion.runtime.app
 fi
 cat <<'TXT'
 To start it:

@@ -128,10 +128,19 @@ and a first alert, in order.
 image. Copy `.env.example` to `.env` and fill it, then check it:
 
 ```bash
+git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git
+cd Aurion
 cp .env.example .env     # then edit: OANDA token, Telegram bot token, your chat ID
-make setup               # verifies the whole chain and sends you one real message
+bash scripts/setup.sh    # verifies the whole chain and sends you one real message
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+**On Windows**, run those in **Git Bash** (bundled with Git for Windows: right-click the
+folder, "Git Bash Here"), not `cmd` or PowerShell. `scripts/setup.sh` detects `python` vs
+`python3` so it works either way; `make` is not required. Windows is fine for a first test,
+but a desktop that sleeps is not an always-on host — the stream drops and the gap is
+backfilled on reconnect, so you lose evaluations rather than data. A small Linux VPS is what
+`deploy/` targets.
 
 `make setup` checks each link in order and stops at the first break, because a later check
 passing tells you nothing if an earlier one failed: the env file, the OANDA account (which
