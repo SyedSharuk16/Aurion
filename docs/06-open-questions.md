@@ -147,13 +147,21 @@ contribution is visible rather than assumed (§3.5). Decision Q5.
 
 ### A13. Real-yield proxy for gold
 
-**Why not definable at acceptable quality:** there is no free, reliable, intraday real-yield
-series. TIPS-ETF prices and nominal-minus-breakeven constructions are low-frequency,
-instrument-specific, and carry their own basis.
+**Corrected on review. My Phase 1 position was a false binary and is withdrawn.**
 
-**Substitute:** `regime.real_yield_source: none` by default. If you supply a feed it becomes
-a feature; absent one, it is **absent**, not approximated (§10.3). I will not ship a fake
-proxy and call it a real-yield correlation.
+I wrote "fake proxy or nothing". That conflated two different claims: there is no free
+*intraday* real-yield series, which is true, and there is no free real-yield series at all,
+which is false. FRED publishes `DFII10` — the 10-year TIPS constant-maturity yield, an
+actual real yield, free, daily — along with `DGS2`, `DGS10` and `T10YIE`. True daily DXY is
+likewise freely available.
+
+**Substitute (revised):** these are implemented as **daily regime conditioners** under
+honest names — `US10Y_real_d`, `US02Y_nominal_d`, `US10Y_nominal_d`, `US10Y_breakeven_d`,
+`DXY_official_d` (`docs/02-definitions.md` §10.3a). Constraints: daily frequency only, flat
+within the day, no intraday interpolation, point-in-time by `published_at`, and
+`DXY_official_d` is used to report `USDX_PROXY`'s realised correlation — which is the check
+§1.2 promised and could not previously perform. What remains genuinely unavailable is an
+intraday real-yield series, and no proxy for one will be faked.
 
 ### A14. "Rejection volume" and VWAP weights
 
@@ -176,12 +184,63 @@ specified, because a proxy built from EURUSD/GBPUSD/USDJPY cannot independently 
 EURUSD/GBPUSD/USDJPY signals — that is circular. Exposure control uses direct USD-beta
 netting instead (§10.5), which is both objective and non-circular.
 
+### A16. Execution and cost assumptions
+
+Promoted to Part A on review. These were specified as config, which understated them: they
+are not tunable settings but **unverifiable assumptions**, and they are the assumptions most
+capable of manufacturing an edge that does not exist.
+
+**Asserts:** that a modelled fill price is what you would have received.
+
+**Why not definable:** no retail trader can observe the counterfactual. Specifically —
+
+- *Stop-loss fills.* A stop is a market order at a moment of adverse movement. Realised
+  slippage depends on the broker's liquidity provider, its internalisation, and its
+  discretion during fast markets. There is no public record of retail stop fills, and the
+  distribution is venue-specific and changes without notice.
+- *Limit-order fill priority.* Whether a limit at the FVG consequent encroachment would have
+  filled when price wicked exactly to it is unobservable. It depends on queue position in a
+  book we never see — and for a CFD, on whether the broker had an interest in filling it.
+- *Bid/ask basis per leg.* Which side of the book each leg transacts on is a modelling
+  choice. Mid-price entries and exits are the single largest source of backtest inflation in
+  retail FX research, and the error compounds across four legs (entry, SL, TP, force-close).
+- *Spread during news.* The widening multiple is broker-specific and heavy-tailed; the mean
+  is not the relevant statistic and the tail is what fills stops.
+
+**Substitutes, all of which are assumptions declared as assumptions:**
+
+| Assumption | Treatment | Honest status |
+|---|---|---|
+| Bid/ask basis per leg | Frozen in `docs/02` §0.3: analysis on mid; long entry and short stop on ask; short entry and long stop on bid; TP on the side that pays | `fixed` — a modelling commitment, not a measurement |
+| Stop slippage | `slip_atr × ATR14(M1) + spread`, default 0.10 ATR | `prior`; to be **measured** against real fills if the account ever produces any, and until then an assumption that may be optimistic in fast markets |
+| Limit fill | Requires trade-*through* by `fill_margin` points, not touch | `prior`; chosen to be conservative because touch-equals-fill flatters exactly the setups this system looks for |
+| Same-M1-bar SL/TP tie | SL assumed first | `fixed` conservative; the **share of trades decided by it is a headline metric**, and a sensitivity run under the optimistic rule bounds the effect |
+| News spread widening | `×4.0` for XAUUSD, `×2.0` FX, exponential decay τ=5min | `prior`, and the weakest item here: it is a guess at a heavy-tailed quantity. Replacing it with a measured distribution from ≥6 months of stored bid/ask is a Phase 4 deliverable, not a footnote |
+
+**The reason this belongs in Part A:** if the measured results are sensitive to any of these,
+the system's apparent edge is a property of my cost assumptions rather than of the market.
+The validation report therefore reports every headline statistic under both the conservative
+and optimistic variants of the tie-break and the slippage multiple, and if the sign of the
+expectancy changes between them, the honest conclusion is that there is no demonstrated edge.
+
 ---
 
 ## Part B — Decisions I need before Phase 2
 
-Each has my recommendation. If you accept all recommendations, reply "accept defaults" and
-I will proceed on them.
+**Status: resolved on review.** Verdicts recorded below; the table retains the original
+options so the reasoning stays auditable.
+
+| Decision | Verdict |
+|---|---|
+| Q1, Q2, Q3, Q4, Q5, Q8, Q11, Q12 | **Accepted as proposed.** |
+| Q6 Mitigation block | **Dropped.** Unresolvable at this sample size; see `docs/02` §5.5 (definition retained, not built). |
+| Q7 Context data | **Accepted, corrected.** Proxy-only for intraday, plus daily real/nominal yields and true DXY under honest names. A13 withdrawn; `docs/02` §10.3a. |
+| Q9 Exit policy | **Accepted with the condition applied.** Module selection runs under one declared policy (all-out-at-TP1). Both policies reported; only one selects. |
+| Q10 History | **Pilot first.** Purchase sized from measured trades/year by the pre-committed rule in `docs/07` §6. |
+| Q13 Tunables | **Re-derived.** The cap of 8 was chosen, not derived, and is deleted. Replaced by a trial budget solved from the deflated Sharpe ratio, with `k`/`g`/`ε` collapsed into one `selectivity` ordinal. `docs/07` §4, §6. |
+| Q14 London Close | **Dropped permanently.** Not revisited; no definition will be invented to unblock it. |
+
+Original options and reasoning:
 
 | # | Decision | Options | My recommendation |
 |---|---|---|---|
@@ -198,35 +257,102 @@ I will proceed on them.
 | **Q11** | Fixture data | May a small real dataset be committed? | **No.** Synthetic hand-annotated fixtures for unit tests; a gitignored cached download for integration tests. Avoids any redistribution question. |
 | **Q12** | Storage | (a) SQLite rolling window + Parquet archive; (b) SQLite only; (c) Postgres | **(a)**. (b) does not fit the 1–2 GB VPS with 5 years of M1 (`docs/01` §8 arithmetic). (c) is right if you would rather run one store and pay for a larger box. |
 | **Q13** | Tunable budget overflow | The `tunable` set is currently **10**; the cap is **8** | Freeze **`sweep M_sweep` at 3** and the **OTE band at [0.62, 0.79]** as `prior`, testing both as robustness variants. Leaves: spread `N`, displacement `k`, FVG `g`, pool `τ`, sweep `ε`, KDE `h_mult`, SL buffer, `e_min`. |
-| **Q14** | London Close window (10:00–12:00 NY, "reversal setups only") | (a) build a third entry model; (b) run the existing two models with `bias` inverted in that window; (c) drop the window | **(c) drop for now.** "Reversal setups only" is not yet an objective entry model, a third model multiplies the candidate population and the multiple-testing burden, and (b) is an untested belief dressed as a configuration. Revisit after the first ablation, with a written definition. |
+| **Q14** | London Close window (10:00–12:00 NY, "reversal setups only") | (a) build a third entry model; (b) run the existing two models with `bias` inverted in that window; (c) drop the window | **(c) DROPPED PERMANENTLY.** Not "revisit". A third entry model multiplies the candidate population and the trial burden in a design that `docs/07` §7 shows cannot resolve the modules it already has. No definition will be invented to unblock it. |
 
-Note that Q14 is me declining to implement a part of your brief until it has a definition.
-"Reversal setups only" is the one item in the original specification that I could not turn
-into something testable without inventing content. Tell me what a reversal setup is and I
-will specify and build it; otherwise it stays out, visibly, rather than being quietly
-approximated.
+Q14 is me declining to implement a part of your brief because it has no definition, and the
+refusal is now permanent rather than deferred. "Reversal setups only" was the one item in
+the original specification I could not turn into something testable without inventing
+content, and the capacity analysis removed the argument for trying: the design cannot
+resolve the five modules it already carries.
 
 ---
 
-## Part C — Pre-registered predictions
+## Part C — Pre-registered predictions, with effect sizes and thresholds
 
-Recorded now so the ablation is a test rather than a search. I will report these against
-the actual results in the Phase 4 report, including where I was wrong.
+**Rewritten on review.** My first version listed eight direction-only predictions of the
+form "contributes nothing detectable". You were right that this is self-confirming: in a
+design whose MDE is 0.13–0.31R (`docs/07` §7), a prediction of "no detectable effect" is
+satisfied by the design's own weakness and cannot be wrong. It was unfalsifiable and should
+not have been written.
 
-| Prediction | Confidence |
-|---|---|
-| Rolling Hurst contributes nothing detectable and is ablated out | high |
-| Camarilla pivots contribute nothing detectable | high |
-| The `volume_proxy` group (VWAP z, rejection weights) contributes nothing detectable | moderate |
-| Quarterly Theory's running AMDX scores contribute nothing detectable **on the in-progress quarter** (the retrospective labels will look informative, which is the look-ahead artefact) | moderate-high |
-| The empirical AMDX phase distribution per quarter index will be closer to uniform than to the A→M→D→X ordering | moderate |
-| MMXM score contributes nothing detectable, because Stage-3 confirmation is rare enough that the sub-sample is too small to measure | moderate |
-| The liquidity-sweep features (depth, recency) **do** carry detectable information — this is the most mechanically plausible part of the ICT set, since penetration-then-reclaim is a genuine observable | moderate |
-| Session/time-of-day features carry detectable information, mostly as a volatility proxy rather than as "kill zones" | moderate |
-| The `rr_min = 2` gate rejects the majority of structurally valid setups, and relaxing it improves expectancy | moderate |
-| Fewer than 800 completed holdout trades will be available across all six instruments, leaving most individual module effects below the detectable threshold | high |
+The fix has two parts: pre-register **point estimates with intervals** so that being wrong
+is possible in both directions, and move the weight of the pre-registration onto the
+**pilot's measurable outputs**, which this design genuinely can resolve, rather than onto
+ablation effects it mostly cannot.
 
-If most of the high-confidence predictions hold, the honest summary of this system will be
-"a session-filtered, sweep-and-MSS entry model with ATR-scaled risk, plus eight modules that
-could not be shown to help." That is a worse-sounding and more useful result than a
-confluence score built from everything.
+### C1 — Ablation effects
+
+`Δ` is the change in overall expectancy (R per trade) when the module is **removed**.
+Negative Δ means removal hurts, i.e. the module helps. Intervals are my subjective 80%
+intervals. "Resolvable" is whether `|Δ_predicted|` exceeds the MDE at the projected
+N = 276 (`docs/07` §7).
+
+| Arm | Δ predicted | 80% interval | Falsified if | Resolvable at N=276? |
+|---|---|---|---|---|
+| Session gating | −0.18 | [−0.45, −0.02] | Δ ≥ +0.05, or Δ ≤ −0.60 | only if σ_d ≤ 0.9 |
+| ICT arrays | −0.10 | [−0.30, +0.03] | Δ ≥ +0.10, or Δ ≤ −0.40 | only if σ_d ≤ 0.5 |
+| Liquidity pools + sweeps | −0.12 | [−0.35, +0.02] | Δ ≥ +0.10, or Δ ≤ −0.45 | only if σ_d ≤ 0.6 |
+| S&R levels | −0.03 | [−0.15, +0.08] | Δ ≤ −0.25 | **no** |
+| Regime | −0.08 | [−0.22, +0.04] | Δ ≥ +0.12, or Δ ≤ −0.32 | only if σ_d ≤ 0.4 |
+| Quarterly Theory *(Tier 2)* | −0.01 | [−0.10, +0.08] | Δ ≤ −0.20 | **no** |
+| MMXM *(Tier 2)* | 0.00 | [−0.08, +0.08] | Δ ≤ −0.18 | **no** |
+| `volume_proxy` *(Tier 2)* | −0.01 | [−0.10, +0.08] | Δ ≤ −0.20 | **no** |
+| Silver Bullet model *(Tier 2)* | −0.04 | [−0.20, +0.10] | Δ ≤ −0.30 | **no** |
+
+Each "falsified if" clause has a lower bound as well as an upper one. That is the point: a
+null prediction is only a prediction if a *large* effect would refute it. Where the
+resolvable column says no, the result **cannot be scored in either direction** and will be
+reported as unresolved. Counting those as confirmations is precisely the move you flagged,
+and the table is built so that it is visible rather than available.
+
+### C2 — Pilot outputs
+
+These are the genuinely falsifiable predictions, because the pilot measures each directly
+and none depends on the ablation's power.
+
+| Quantity | Predicted | 80% interval |
+|---|---|---|
+| P1 XAUUSD completed trades per year | 12 | [4, 35] |
+| P1 total completed trades, concatenated OOS, 6 instruments | 276 | [110, 870] |
+| P2 per-trade R dispersion `σ_R` | 1.4 | [1.1, 1.8] |
+| P3 baseline annualised Sharpe, concatenated OOS | 0.6 | [0.0, 1.3] |
+| P4 paired difference dispersion `σ_d` for feature-group arms | 0.9 | [0.5, 1.6] |
+| P5 measured trial-Sharpe dispersion, as a ratio to `1/√T` | 0.45 | [0.20, 0.80] |
+| Share of trades decided by the same-M1-bar SL/TP tie-break | 3% | [1%, 8%] |
+| Share of candidates rejected for `no_target_at_min_rr` | 45% | [25%, 65%] |
+| OANDA M1 bid/ask depth available for XAUUSD | < 5 years | — |
+
+### C3 — The consequence prediction
+
+Taking C2 at its point estimates and pushing them through `docs/07` §4: a baseline
+annualised Sharpe of 0.6 on 1,260 out-of-sample days affords **one** trial under the
+worst-case assumption and about **two** at the predicted trial correlation.
+
+So the prediction I am actually committing to is this: **the pilot will show that this
+design cannot afford module selection at all.** The five Tier-1 arms will have to ship on
+prior plausibility, with the ablation reported as description rather than used as a decision
+procedure, unless at least one of the trade-count levers in `docs/07` §7 is pulled.
+
+If that is right, the honest summary of the finished system is: *a session-filtered,
+sweep-and-MSS entry model with ATR-scaled risk and a calibrated probability gate, carrying
+five module groups whose individual contributions this quantity of data cannot establish.*
+That is a worse-sounding and more useful statement than a confluence score assembled from
+everything, and it is the statement I expect to be making.
+
+I would be wrong, and glad to be, if P1 lands at the top of its interval and P4 at the
+bottom — roughly 800 trades with σ_d near 0.5 gives an MDE around 0.05R, which resolves
+every effect in C1.
+
+### C4 — Scoring rule
+
+Pre-committed so the scoring is not negotiated afterwards:
+
+1. Report every C1 and C2 realised value against its prediction.
+2. Count how many 80% intervals contained the realised value. **Calibration is tested in
+   both directions:** materially fewer than 80% means I was overconfident; essentially all
+   of them means the intervals were too wide to be informative, which is the same failure
+   wearing a different hat.
+3. C1 rows marked unresolvable are excluded from the count and listed separately as
+   unresolved. They are not scored as correct.
+4. C3 is scored on whether the affordable trial count derived from the measured P3 and P5
+   is ≤ 2.

@@ -502,7 +502,13 @@ bullish OB at j  →  bearish breaker  iff
 ```
 `confirmed_at = close_time(v)`. Parameters: `W_brk` default 20 bars (`prior`).
 
-### 5.5 Mitigation block — **`heuristic`**
+### 5.5 Mitigation block — **DROPPED** (Q6)
+
+> **Not built.** Dropped on review. The reasoning in `docs/07-power-and-capacity.md` §3 is
+> decisive: a module whose affected fraction is small needs a per-affected-trade effect of
+> ~1R to be resolvable at the projected sample size, which is not a plausible effect for a
+> variant order block. The definition is retained below for the record, so that the rejected
+> option and its reason are auditable, but no code implements it.
 
 ICT's distinction between a breaker and a mitigation block is not consistently stated in the
 source material. I am unwilling to pretend otherwise. The testable distinction adopted:
@@ -515,8 +521,9 @@ source material. I am unwilling to pretend otherwise. The testable distinction a
 bullish mitigation block: an OB at j whose causing break at t followed a swing low S
   with L(S) > L(previous swing low)        (a higher low: failure to take sell-side liquidity)
 ```
-`confirmed_at = close_time(t)`. If ablation cannot separate mitigation blocks from ordinary
-OBs, the concept is dropped rather than retained for completeness. Decision Q6.
+`confirmed_at = close_time(t)`. Dropped per Q6: at this sample size the ablation could never
+separate it from an ordinary order block, so the 40 lines buy an unanswerable question. If
+power is the binding constraint, every marginal module is net negative.
 
 ### 5.6 Balanced price range (BPR) — `exact`
 
@@ -1023,11 +1030,48 @@ EWMA_cov(x,y)_t = λ·EWMA_cov_{t−1} + (1−λ)·(x_t − μ̂x)(y_t − μ̂y
 `USDX_PROXY`, and XAUUSD against each FX pair. Reported in `/status`; used as a feature.
 **Not** used as the exposure gate — see §10.5.
 
-Optional real-yield proxy: `regime.real_yield_source` (default `none`). If a feed is
-configured (e.g. a TIPS ETF or a 10y futures proxy minus breakeven), the XAUUSD/real-yield
-correlation is added as a feature. With no feed it is absent, not faked. There is no
-free, reliable intraday real-yield series; pretending otherwise would be the hand-waving
-you asked me to flag.
+### 10.3a Daily macro conditioners — `operational` (revised, Q7)
+
+My Phase 1 position — "no real-yield feed, so nothing" — was a false binary and is
+withdrawn. Real yields, nominal yields and the true dollar index are all available free at
+**daily** frequency. What is unavailable free is an *intraday* series. Those are different
+claims and I conflated them.
+
+Implemented as daily conditioners, updated on the D1 close, under names that state exactly
+what they are:
+
+| Feature | Source series | What it is |
+|---|---|---|
+| `US02Y_nominal_d` | FRED `DGS2` | 2-year nominal Treasury yield, constant maturity |
+| `US10Y_nominal_d` | FRED `DGS10` | 10-year nominal Treasury yield |
+| `US10Y_real_d` | FRED `DFII10` | 10-year TIPS yield — an actual real yield, not a proxy |
+| `US10Y_breakeven_d` | FRED `T10YIE` | 10-year breakeven inflation (`DGS10 − DFII10`) |
+| `DXY_official_d` | daily ICE DXY close | the real index, distinct from `USDX_PROXY` (§1.2) |
+
+Derived features: level, 1-day and 20-day change, and the EWMA correlation of XAUUSD daily
+returns against `US10Y_real_d` changes and against `DXY_official_d` returns.
+
+Constraints that keep this honest:
+
+- **Daily only.** These are `d`-suffixed and carry the prior day's published value; an
+  intraday signal sees the value as of the last completed D1 close, never a same-day figure
+  that had not yet been published. Treasury yields are published with a lag and are
+  occasionally revised; the adapter stores `published_at` and the backtest reads
+  point-in-time, exactly as for the economic calendar (§3.5).
+- **Naming.** `US10Y_real_d` is a measured real yield. `USDX_PROXY` remains a proxy and
+  keeps that name. `DXY_official_d` is the real index and is used to report the proxy's
+  realised correlation, which is the check §1.2 promised.
+- **No intraday interpolation.** A daily series is not forward-filled into an intraday
+  feature with an implied intraday value. It is a step function, flat within the day.
+- Series identifiers above are from FRED's published catalogue and are to be verified in
+  Phase 2 against the live API rather than trusted from memory. A free API key goes in
+  `.env` (`AURION_FRED_API_KEY`).
+
+These enter as `macro`-tagged features and are ablated with the `regime` arm, not as a
+separate arm (`docs/07` §7).
+
+Legacy setting: `regime.real_yield_source` is removed; `regime.macro_daily.enabled`
+replaces it.
 
 ### 10.4 Session VWAP and z-score — `exact`, with the §0.5 caveat
 
@@ -1098,6 +1142,7 @@ Groups, with the count of features each contributes (exact list in Phase 2):
 | MMXM | score, stage_reached | `mmxm` |
 | Regime | atr_pct, rv, GK/Parkinson, ADX, Hurst, VR z*, vol/trend labels | `regime` |
 | Volume proxy | VWAP z, rejection weights | `volume_proxy` |
+| Macro daily | real/nominal yields, breakeven, official DXY: level, 1d and 20d change, XAU correlations (§10.3a) | `macro` |
 | Exposure | net USD exposure, correlations | `exposure` |
 
 Tags matter operationally: the ablation study removes whole tag groups

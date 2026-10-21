@@ -286,7 +286,14 @@ validation error rather than defaulting. Every numeric value carries a provenanc
 - `tunable` — exposed to walk-forward optimisation with a declared search range. Every
   `tunable` parameter's range enters the trial count used by the deflated Sharpe ratio.
 
-The number of `tunable` parameters is capped at **8** (`validation.max_tunable_params`).
-With 300–2,000 trades available, a larger search space is not estimable; the cap is an
-architectural constraint on overfitting, not a style preference. The config hash is
+The search budget is on **trials**, not parameters, and it is derived rather than chosen:
+a trial is any configuration a selection decision is taken from — parameter settings and
+ablation arms alike — because that is what the deflated Sharpe ratio penalises. Each
+doubling of the trial count costs roughly 0.15 of annualised Sharpe, so
+`validation.max_trials` is solved from the pilot's measured baseline Sharpe and trial
+correlation (`docs/07-power-and-capacity.md` §4, §6). Only one dimension is searched — an
+ordinal `analysis.selectivity` — because the three thresholds it collapses
+(`displacement_k`, `fvg_min_atr`, `sweep_min_penetration_atr`) move the candidate
+population along a single axis, and varying them independently would spend three
+dimensions of budget on one. Everything else is `prior` or `fixed`. The config hash is
 recorded on every signal and every backtest run.

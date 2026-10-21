@@ -6,20 +6,22 @@ no broker order endpoint is referenced anywhere in the design.
 
 ---
 
-## Status: Phase 1 — architecture and definitions, awaiting review
-
-Nothing in this repository is executable yet. That is deliberate: the agreed delivery
-plan gates code behind approval of the written definitions, because every module in
-Phase 3 is a literal transcription of a definition in `docs/02-definitions.md`. If a
-definition is wrong, the code is wrong in a way tests cannot detect.
+## Status: Phase 1 approved; Phase 1.5 (power and capacity) delivered
 
 | Phase | Contents | State |
 |---|---|---|
-| 1 | Architecture, exact definitions, config surface, validation protocol, open questions | **Delivered — review required** |
-| 2 | Data adapters (OANDA v20 first), resampler, session engine, tests | Blocked on Phase 1 approval |
-| 3 | Analysis modules (`structure`, `ict`, `sr`, `quarterly`, `mmxm`, `regime`) + tests | Blocked |
-| 4 | Event-driven backtester, walk-forward, ablation study, validation report | Blocked |
+| 1 | Architecture, exact definitions, config surface, validation protocol, open questions | **Approved** |
+| 1.5 | Power, trial capacity, the module cut, pilot specification (`docs/07`, `tools/power.py`) | **Delivered — review required** |
+| 2 | Data adapters (OANDA v20 first), resampler, session engine, macro daily series, schema, tests | Next |
+| 2E | **Power pilot** (`docs/07` §5) — XAUUSD only, gates data purchase and trial budget | Exit gate on Phase 2 + 3a |
+| 3 | Analysis modules: `structure`, `ict`, `sr`, `regime` (Tier 1) and `quarterly`, `mmxm` (Tier 2, observational) + tests | Blocked |
+| 4 | Event-driven backtester, purged walk-forward, ablation, validation report | Blocked |
 | 5 | Signal engine, Telegram, always-on runtime, Docker/systemd | Blocked |
+
+The pilot is deliberately placed *after* the data layer and a minimal analysis slice,
+because generating a single candidate requires the resampler plus structure, arrays and
+liquidity. It cannot precede Phase 2, and claiming otherwise would mean fabricating the
+trade count it exists to measure.
 
 Live alerts are gated behind Phase 4 passing its own acceptance criteria
 (`docs/04-validation-protocol.md` §8), and `[PAPER]`-tagged forward running for ≥4 weeks
@@ -36,8 +38,10 @@ before the tag is removed.
 | `docs/03-signal-engine.md` | Top-down bias cascade, decision rule, signal lifecycle state machine, position sizing |
 | `docs/04-validation-protocol.md` | Backtest mechanics, cost model, walk-forward, ablation, power analysis, deflated Sharpe, Monte Carlo |
 | `docs/05-data-contracts.md` | Adapter interface, DB schema, feature store, Telegram outbox |
-| `docs/06-open-questions.md` | Everything that **cannot** be defined objectively, the closest testable substitute, and the 14 decisions I need from you |
-| `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `tunable` |
+| `docs/06-open-questions.md` | The 16 concepts that **cannot** be defined objectively and their testable substitutes; the 14 decisions (all resolved); pre-registered predictions with effect sizes |
+| `docs/07-power-and-capacity.md` | Derived trial budget, minimum detectable effects, the module cut, the pilot spec, and two corrections to Phase 1 |
+| `tools/power.py` | Runnable calculator behind every number in `docs/07` |
+| `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
 
 ---
 
@@ -55,14 +59,17 @@ These are properties of the architecture, not aspirations:
 3. **No repainting.** Every derived object carries `(event_time, confirmed_at)`. A swing
    that occurred at `t` is invisible until `t + N` bars have closed, forever, including on
    restart and replay. (`docs/02-definitions.md` §4.1)
-4. **No magic numbers.** Every numeric threshold lives in `config.yaml` with a provenance
-   tag and, if `tunable`, a declared search range that is counted toward the multiple-testing
-   correction. The optimisation budget is capped at 8 tunable parameters
-   (`docs/04-validation-protocol.md` §6).
-5. **Ablation decides inclusion.** ICT arrays, S&R, Quarterly Theory, MMXM and the regime
-   layer are hypotheses. Each ships **disabled** and is enabled only if it improves
-   out-of-sample expectancy by more than the minimum detectable effect for the available
-   sample size. Negative results are reported, not buried.
+4. **No magic numbers, and a derived search budget.** Every threshold lives in
+   `config.yaml` with a provenance tag. The budget is on **trials** — any configuration a
+   selection decision is taken from — and it is solved from the deflated Sharpe ratio rather
+   than chosen: each doubling of the trial count costs roughly 0.15 of annualised Sharpe
+   (`docs/07` §4). Only one dimension is searched, an ordinal `selectivity`, because the
+   three thresholds it collapses move the candidate population along a single axis.
+5. **Ablation decides inclusion, where power allows.** Five module groups are
+   selection-eligible; four are built and measured but not selection-eligible in v1; four
+   are not built (`docs/07` §7). Whether the sample can resolve even one effect depends on a
+   quantity that is still unmeasured, and the pilot measures it before any of this is
+   treated as a decision procedure.
 
 ---
 
@@ -92,16 +99,32 @@ cannot be quietly revised afterwards.
 
 **Statistical**
 
-- **The sample size is the binding constraint, not the feature count.** A selective entry
-  model across 6 instruments plausibly yields 300–2,000 completed trades over the full
-  history. At a per-trade R standard deviation of ~1.4, the standard error of expectancy at
-  N=500 is 0.063R, so effects smaller than roughly 0.18R are not detectable
-  (`docs/04-validation-protocol.md` §5). Many module contributions are plausibly smaller
-  than that. The honest outcome for several modules is "indistinguishable from zero", not
-  "helps a little".
+- **The sample size is the binding constraint, and it may bind completely.** The projected
+  trade count is ~276 on the concatenated out-of-sample set (base case; `docs/07` §2). At
+  that N, a paired ablation arm resolves effects of 0.13R to 0.31R depending on a dispersion
+  term that has not been measured — while the effects I actually predict for these modules
+  are 0.03R to 0.15R. **At the pessimistic end, this design cannot resolve any module
+  contribution at all**, and the correct response is to ship the base model with the
+  ablation reported as description rather than used as a decision procedure. Which end
+  applies is the pilot's job to establish.
+- **Two Phase 1 acceptance criteria were unmeetable as written and have been corrected.**
+  The ≥200-trade holdout requirement (projection: ~69) and the DSR ≥ 0.95 requirement on a
+  12-month holdout (unattainable below an annualised Sharpe of ~1.65, regardless of system
+  quality) are both replaced; the primary out-of-sample set is now the concatenated
+  walk-forward test blocks, and the holdout is a degradation check with its power stated
+  (`docs/07` §2, §4).
 - Learned confluence weights are therefore fit on **candidate setups** (a low-threshold
   superset, 10–50× larger) rather than on emitted signals alone, with a floor of 20 events
   per feature. Gradient boosting is not used as the primary model at these sample sizes.
+- **Rare-pattern modules are unresolvable in principle here, not merely unproven.** A module
+  firing on 5% of candidates needs a ~1.4R per-trade effect to be detected at the projected
+  N. That is what removed MMXM from selection eligibility and mitigation blocks from the
+  build entirely.
+- **Execution and cost assumptions are assumptions, not settings.** Stop-fill slippage,
+  limit-fill priority, the per-leg bid/ask basis and news spread widening are all
+  unverifiable without real fills. Every headline statistic is reported under conservative
+  and optimistic variants, and if the sign of expectancy changes between them, the honest
+  conclusion is that no edge has been demonstrated (`docs/06` A16).
 - Walk-forward folds are **purged and embargoed**; overlapping trade horizons otherwise
   leak label information across the fold boundary.
 - The reported Sharpe is **deflated** for the number of effectively independent trials.

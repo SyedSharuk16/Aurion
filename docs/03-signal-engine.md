@@ -257,10 +257,14 @@ optimistic rule to bound the effect.
   no-BE variant, since this assumption changes expectancy materially and should not be
   buried in a default.
 - Partial-exit accounting: `lifecycle.tp_allocation` default `[0.5, 0.3, 0.2]` (`prior`).
-  Realised R is the allocation-weighted sum. The headline expectancy is reported for **both**
-  the all-out-at-TP1 policy (which is what the model is trained on) and the scaled policy,
-  because mixing a model trained on one policy with results reported under another is the
-  kind of quiet inconsistency that makes a backtest unreproducible.
+  Realised R is the allocation-weighted sum.
+- **Module selection runs under exactly one declared exit policy (Q9): all-out-at-TP1.**
+  That policy is chosen because it is the one the model's label is defined on
+  (`docs/03` §3.2), so the selection criterion and the training objective agree. The scaled
+  policy is reported descriptively alongside it and is **never** used for an enable/disable
+  decision, a parameter choice, or any other selection. Reporting both is description;
+  selecting under both is a second fork in the garden of forking paths, and it would double
+  the effective trial count without appearing in the trial ledger.
 - Every transition writes a row to `signal_states` with `(signal_id, state, at_utc, price,
   revision)` and enqueues exactly one outbox row.
 

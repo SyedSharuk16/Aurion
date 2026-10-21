@@ -6,11 +6,17 @@
 #   [tunable] exposed to walk-forward optimisation; range declared; counts toward the
 #             multiple-testing correction (docs/04-validation-protocol.md §6)
 #
-# Tunable budget: 8 (validation.max_tunable_params). The natural candidate set is 10;
-# this file ships the Q13 recommendation PRE-APPLIED (sweep_max_bars and the OTE band
-# frozen as [prior]), leaving exactly 8 tunable. swing_N_scale is marked
-# [tunable, OPTIONAL] and is DISABLED by default — enabling it requires freezing another.
-# Confirm or override in docs/06-open-questions.md Q13.
+# TRIAL budget, not a parameter budget. Q13 revised: the former cap of 8 tunable
+# parameters was chosen, not derived, and is deleted. The binding quantity is the number of
+# TRIALS -- any configuration a selection decision is taken from, parameter settings and
+# ablation arms alike -- because that is what the deflated Sharpe ratio penalises.
+# validation.max_trials is solved from the pilot's measured Sharpe and trial correlation
+# (docs/07-power-and-capacity.md §4, §6). Each doubling of the trial count costs roughly
+# 0.15 of annualised Sharpe.
+#
+# displacement_k, fvg_min_atr and sweep_min_penetration_atr jointly move the candidate
+# population in one direction, so they are collapsed into analysis.selectivity rather than
+# varied independently. Everything formerly [tunable] is now [prior].
 #
 # Secrets live only in .env. Nothing secret may appear in this file.
 
@@ -126,7 +132,7 @@ blocks:
   weekend_gap_atr_mult: 0.5        # [prior] larger gap extends the block to one H1 close
 
 spread:
-  max_median_mult: 2.5             # [tunable] range [1.5, 5.0]
+  max_median_mult: 2.5             # [prior] (was tunable; Q13 re-derivation)
   bucket_minutes: 15               # [prior] time-of-day conditioning (definitions §3.4)
   bucket_window_obs: 20            # [prior]
   weekday_classes: [[mon], [tue, wed, thu], [fri]]   # [prior]
@@ -149,26 +155,33 @@ news:
 analysis:
   atr_period: 14                   # [fixed] Wilder
 
+  # The only searched dimension. 3 ordinal levels, moved together, because these three
+  # thresholds trade candidate count against candidate quality along one axis.
+  selectivity: base                # loose | base | tight
+  selectivity_levels:
+    loose: { displacement_k: 0.75, fvg_min_atr: 0.05, sweep_min_penetration_atr: 0.02 }
+    base:  { displacement_k: 1.00, fvg_min_atr: 0.10, sweep_min_penetration_atr: 0.05 }
+    tight: { displacement_k: 1.50, fvg_min_atr: 0.20, sweep_min_penetration_atr: 0.10 }
+
   structure:
     swing_half_width: { M5: 2, M15: 2, H1: 3, H4: 3, D1: 3, W1: 2 }   # [prior]
-    swing_N_scale: 1               # [tunable, OPTIONAL] {1, 2} — omitted from the budget by default
-    displacement_k: 1.0            # [tunable] range [0.5, 2.5]
+    swing_N_scale: 1               # [prior] not searched
+    displacement_k: 1.0            # [prior] set by analysis.selectivity
     require_fvg_for_displacement: true    # [fixed] per brief
     mss_sweep_window_bars: 10      # [prior]
 
   ict:
-    fvg_min_atr: 0.10              # [tunable] range [0.0, 0.5]
+    fvg_min_atr: 0.10              # [prior] set by analysis.selectivity
     fvg_mitigation_threshold: 1.0  # [fixed] fill fraction
     ob_lookback_bars: 10           # [prior]
     ob_extent: wick                # [prior] wick | body
     breaker_window_bars: 20        # [prior]
-    enable_mitigation_blocks: true # (Q6) dropped if the ablation cannot separate it from OB
     bpr_window_bars: 10            # [prior]
 
   liquidity:
-    pool_tolerance_atr: 0.15       # [tunable] range [0.05, 0.5]
+    pool_tolerance_atr: 0.15       # [prior] (was tunable)
     pool_lookback_bars: 100        # [prior]
-    sweep_min_penetration_atr: 0.05  # [tunable] range [0.0, 0.3]
+    sweep_min_penetration_atr: 0.05  # [prior] set by analysis.selectivity
     sweep_reclaim_buffer_atr: 0.0  # [prior]
     sweep_max_bars: 3              # [prior] frozen per Q13 recommendation (was tunable [1,10])
 
@@ -179,7 +192,7 @@ analysis:
 
   sr:
     method: kde                    # [prior] kde | dbscan
-    kde_bandwidth_atr: 0.25        # [tunable] range [0.1, 0.6]
+    kde_bandwidth_atr: 0.25        # [prior] (was tunable)
     dbscan_eps_atr: 0.25           # [prior] only when method=dbscan
     lookback_bars: 500             # [prior]
     recency_halflife_bars: 250     # [prior]
@@ -231,7 +244,16 @@ analysis:
     variance_ratio_window: 500     # [prior]
     corr_halflife_h1_bars: 120     # [prior]
     vwap_min_bars: 20              # [prior]
-    real_yield_source: none        # [prior] (Q7) — absent, not approximated
+    macro_daily:                   # (Q7, revised) daily conditioners under honest names
+      enabled: true
+      series:                      # FRED ids; verify against the live API in Phase 2
+        US02Y_nominal_d: DGS2
+        US10Y_nominal_d: DGS10
+        US10Y_real_d: DFII10       # actual 10y TIPS yield, not a proxy
+        US10Y_breakeven_d: T10YIE
+      dxy_official: true           # true ICE DXY daily close; distinct from usdx_proxy
+      point_in_time: true          # [fixed] read as published; no same-day unpublished value
+      intraday_interpolation: false  # [fixed] step function, flat within the day
 
 exposure:
   usd_beta_window_h1: 500          # [prior]
@@ -252,9 +274,10 @@ entry:
 
 signal:
   rr_min: 2.0                      # [prior] per brief
-  expected_r_min: 0.15             # [tunable] range [0.0, 0.5]
+  expected_r_min: 0.15             # [prior] frozen a priori; the threshold sweep is
+                                   #   reported as a diagnostic and NOT used for selection
   p_floor: 0.25                    # [prior]
-  sl_buffer_atr: 0.25              # [tunable] range [0.1, 1.0]
+  sl_buffer_atr: 0.25              # [prior] (was tunable)
   sl_min_atr: 0.3                  # [prior] guards fictitious R multiples
   tp_min_level_strength: 0.4       # [prior]
   max_pending_bars: 12             # [prior] M15 bars
@@ -312,14 +335,23 @@ runtime:
 # Validation
 # ---------------------------------------------------------------------------
 validation:
-  max_tunable_params: 8            # [fixed] architectural overfitting cap
+  # Derived, not chosen. Solved from the pilot's measured baseline Sharpe (P3) and trial
+  # correlation (P5) by docs/07 §6. The value below is the projection-based placeholder.
+  max_trials: 8                    # [derived] parameter settings + ablation arms, together
+  oos_primary: concat_walkforward   # [fixed] not the 12m holdout (docs/07 Correction 1)
+  holdout_role: degradation_check   # [fixed] not a significance gate (docs/07 Correction 1)
   holdout_months: 12               # [fixed] untouched until the final test
   wf_train_months: 24              # [prior]
   wf_validate_months: 3            # [prior]
   wf_test_months: 3                # [prior]
   wf_step_months: 3                # [prior]
   embargo: max_label_horizon_plus_1_bar   # [fixed]
-  min_holdout_trades: 200          # [fixed] below this the holdout is 'inconclusive'
+  min_oos_trades: 341              # [fixed] resolves a 0.20 R effect at f=0.5 (docs/07 §3)
+  selection_exit_policy: all_out_tp1  # [fixed] ONE policy selects (Q9); both are reported
+  module_tiers:                    # the cut; docs/07 §7
+    tier1_selection_eligible: [sessions, ict_arrays, liquidity, sr, regime]
+    tier2_observational: [quarterly, mmxm, volume_proxy, silver_bullet]
+    tier3_not_built: [mitigation_block, camarilla_standalone, hurst_standalone, london_close]
   min_cell_trades: 30              # [fixed] breakout cells below this show counts only
   bootstrap_paths: 10000           # [prior]
   block_bootstrap_expected_len: 10 # [prior] trades

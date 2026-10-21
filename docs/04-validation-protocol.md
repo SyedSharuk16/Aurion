@@ -115,8 +115,18 @@ Within development: rolling walk-forward
     train 24 months -> validate 3 months -> test 3 months, step 3 months
 ```
 The validate block is where calibration (isotonic) and any hyperparameter choice happen;
-the test block is scored and never fitted. Reported performance within development is the
-concatenation of test blocks only.
+the test block is scored and never fitted.
+
+**Primary out-of-sample set: the concatenation of all walk-forward test blocks.** Revised
+after the capacity analysis (`docs/07` §2, Correction 1). The concatenated test blocks are
+genuine out-of-sample data — each block was scored before any later block existed and none
+was fitted — and they are roughly four times the size of the 12-month holdout. Every
+headline statistic, the ablation, and the deflated Sharpe are computed on this set.
+
+**The 12-month holdout is a degradation check, not a significance test.** It remains the
+only entirely untouched data and is therefore the right instrument for detecting gross
+breakage, but at a projected ~69 trades it has no power to establish significance and will
+not be reported as if it did. Its power is printed next to its result.
 
 ### 3.2 Purging and embargo (non-optional)
 
@@ -163,6 +173,11 @@ one number hides where the effect comes from.
 
 ### 4.2 Decision rule
 
+Selection runs under **one** declared exit policy — all-out-at-TP1, matching the training
+label (`docs/03` §5, Q9). The scaled-exit policy is reported descriptively and never used
+for a selection decision; selecting under both policies would be a second fork and would
+double the effective trial count invisibly.
+
 A module is **enabled by default only if** its removal reduces out-of-sample expectancy by
 more than the minimum detectable effect for the available sample size (§5), after
 Holm–Bonferroni correction across the ablation family. Otherwise it ships disabled and the
@@ -176,6 +191,11 @@ the summary table, not relegated to an appendix.
 ---
 
 ## 5. Statistical power — what this sample size can and cannot detect
+
+`tools/power.py` computes everything in this section and `docs/07-power-and-capacity.md`
+carries the derived module and trial caps. The tables here are the unpaired baseline; the
+paired-CRN-on-affected-subset design that the system actually uses is in `docs/07` §3 and is
+2–6× more powerful.
 
 Per-trade realised R has an empirical standard deviation of roughly 1.2–1.6 for a system
 targeting 2R; the table uses `σ = 1.4R`. For the paired case, the standard deviation of the
@@ -217,14 +237,24 @@ The number of trials `N` used in §6.3 is **counted from this table**, not estim
 declared grid, because the declared grid always undercounts: the real search includes every
 abandoned idea.
 
-Tunable-parameter budget: **8** (`validation.max_tunable_params`). The current `tunable`
-set from `docs/02-definitions.md` is: `spread N`, `displacement k`, `FVG g`, `pool τ`,
-`sweep ε`, `sweep M`, `KDE h_mult`, `SL buffer`, `OTE band`, `e_min`. That is **10** — two
-over budget. Resolving this is decision Q13; my recommendation is to freeze `sweep M` at 3
-and the `OTE band` at [0.62, 0.79] as `prior`, testing both only as robustness variants.
-`config.yaml` ships that recommendation pre-applied, so the file as delivered declares
-exactly 8 `tunable` parameters; overriding Q13 means re-tagging two values and re-checking
-this count.
+**Trial budget, derived (supersedes the earlier parameter cap).** The original
+`validation.max_tunable_params: 8` was chosen, not derived, and has been deleted. The
+binding quantity is not the parameter count but the **trial** count, where a trial is any
+configuration from whose result a selection decision is taken — parameter settings and
+ablation arms alike. `docs/07-power-and-capacity.md` §4 derives the cap from the deflated
+Sharpe ratio:
+
+- Each doubling of the trial count costs roughly **0.15 of annualised Sharpe**.
+- At 5 years of concatenated OOS and independent trials, 8 trials require an observed
+  SR_ann of ≈1.39 to clear DSR ≥ 0.95; 20 trials require ≈1.59.
+- `validation.max_trials` is therefore solved from the pilot's measured baseline Sharpe and
+  measured trial correlation, not fixed in advance.
+
+The three previously independent `tunable` parameters that jointly move the candidate
+population — `displacement k`, `FVG g`, `sweep ε` — are collapsed into a single ordinal
+`selectivity ∈ {loose, base, tight}`, because varying them separately spends three
+dimensions of budget on one axis. Everything else formerly `tunable` is reclassified
+`prior` (`docs/07` §6).
 
 ### 6.2 Effective trial count
 
@@ -241,7 +271,11 @@ reported alongside so the degree of conservatism is visible.
 
 ### 6.3 Deflated Sharpe ratio (Bailey & López de Prado)
 
-Computed on **daily equity returns in R units** over the holdout.
+Computed on **daily equity returns in R units** over the **concatenated walk-forward
+out-of-sample series**, not the 12-month holdout. Revised after the capacity analysis
+(`docs/07` §4, Correction 2): on 252 daily observations, PSR(0) caps at ≈0.84 for an
+annualised Sharpe of 1.0, and zero trials are affordable below SR_ann ≈ 1.65 — so
+DSR ≥ 0.95 on the holdout alone was unattainable regardless of how good the system is.
 
 Probabilistic Sharpe ratio, with `ŜR` the per-observation Sharpe, `T` observations,
 `γ̂₃` skewness and `γ̂₄` (non-excess) kurtosis:
@@ -303,9 +337,17 @@ All of the following, jointly. Any failure keeps the tag.
 3. Determinism: identical ledgers across two runs at the same config hash.
 4. Live-vs-replay reconciliation: 100% of recorded paper signals reproduced exactly by the
    backtester over the same window (instrument, direction, entry, SL, TP1–3, p̂, timestamps).
-5. Holdout trades ≥ 200. Below that the holdout is reported as inconclusive.
-6. Holdout expectancy > 0 with the 95% stationary-block-bootstrap lower bound > 0.
-7. Deflated Sharpe ≥ 0.95 using `N_raw`.
+5. **Concatenated walk-forward OOS trades ≥ 341** — the count at which a paired-CRN arm
+   resolves a 0.20R effect at `f = 0.5` (`docs/07` §3). The earlier criterion (≥200 trades
+   in the 12-month holdout) is withdrawn: the projection puts the holdout at ~69 trades, so
+   it was unmeetable by construction.
+6. Concatenated-OOS expectancy > 0 with the 95% stationary-block-bootstrap lower bound > 0.
+   The 12-month holdout is additionally reported as a degradation check — expectancy within
+   the bootstrap CI of the concatenated OOS — with its low power stated, not as a pass/fail
+   significance gate.
+7. Deflated Sharpe ≥ 0.95 on the **concatenated OOS** using `N_raw` from the trial ledger.
+   If the measured trial correlation makes the mild budget column apply (`docs/07` §4), both
+   the worst-case and measured-`√V` DSR are reported and the worst case is the gate.
 8. The fraction of trades decided by the same-M1-bar tie-break < 5%, or the optimistic-rule
    sensitivity run also passes 6 and 7.
 9. ≥ 4 weeks of `[PAPER]` forward running with: zero unhandled exceptions, zero missed

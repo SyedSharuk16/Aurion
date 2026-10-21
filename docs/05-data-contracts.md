@@ -126,6 +126,36 @@ prints in its header rather than hiding.
 
 ---
 
+## 2a. Macro daily provider
+
+```python
+class MacroProvider(Protocol):
+    async def series(
+        self, series_id: str, start: date, end: date, as_published_before: datetime | None
+    ) -> list[MacroObs]: ...
+
+@dataclass(frozen=True, slots=True)
+class MacroObs:
+    series_id: str
+    observation_date: date       # the date the value describes
+    value: float
+    published_at: datetime       # when it became known (UTC)
+    revision: int
+```
+
+Two fields carry the whole point. `observation_date` is what the number is *about*;
+`published_at` is when it could first have been read. Treasury yields are published with a
+lag and are occasionally revised, so a feature built on `observation_date` alone would let a
+Tuesday signal read Tuesday's close before it existed. `MarketView.macro()` filters on
+`published_at <= as_of`, the same rule as every other derived object.
+
+Stored in `macro_obs(series_id, observation_date, revision, value, published_at)` with
+`PK(series_id, observation_date, revision)`, so the point-in-time view is a query, not a
+reconstruction. Values are step functions within the day; no intraday interpolation
+(`docs/02-definitions.md` §10.3a).
+
+---
+
 ## 3. Database schema
 
 SQLAlchemy 2.x declarative, async driver (`aiosqlite` / `asyncpg`). No SQLite-only types, no
