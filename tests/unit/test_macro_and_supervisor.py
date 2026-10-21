@@ -14,6 +14,7 @@ from aurion.core.timeframe import UTC, TimeFrame
 from aurion.data.adapters.base import AdapterError
 from aurion.data.macro import FredProvider, MacroCache, MacroObs, StaticMacroProvider
 from aurion.data.repository import InMemoryBarRepository
+from aurion.data.resample import ResamplerSet
 from aurion.data.store import Store
 from aurion.data.supervisor import COLD_START_SLICE_DAYS, IngestSupervisor
 from tests.conftest import make_m1
@@ -314,3 +315,36 @@ async def test_staleness_is_none_before_any_candle(cfg):
     assert sup.staleness("EURUSD", T0) is None
     assert await sup.check_staleness(T0) == []
     await store.dispose()
+
+
+async def test_a_partial_bar_at_the_replay_boundary_is_not_a_determinism_failure(rig):
+    """The first bar of a replay window is rebuilt from only the part of itself inside it.
+
+    A W1 bar is partial for up to a week after every restart, so reporting that as a hard
+    non-determinism failure fired the loudest alert in the system on a healthy process and
+    cost it its meaning.
+    """
+    sup, _store, repo, _, _, candles = rig
+    await sup.ingest(candles)
+    assert sup.stats.determinism_mismatches == 0
+
+    repo.clear("EURUSD")
+    # Replay from the middle, so the bar containing `since` is necessarily truncated.
+    midpoint = candles[len(candles) // 2].open_time
+    await sup.rehydrate("EURUSD", since=midpoint, verify_determinism=True)
+
+    assert sup.stats.determinism_mismatches == 0
+
+
+async def test_rehydrate_resamples_on_the_configured_anchors(cfg):
+    """Live ingest and replay must bucket identically, or every restart reports a mismatch."""
+    store = Store("sqlite+aiosqlite:///:memory:")
+    await store.create_all()
+    try:
+        sup = IngestSupervisor(cfg, FakeAdapter([]), store, InMemoryBarRepository(), EventBus())
+        sup._resamplers["EURUSD"] = ResamplerSet("EURUSD", (TimeFrame.D1,))
+        await sup.rehydrate("EURUSD", since=T0 - timedelta(days=1), verify_determinism=False)
+        rebuilt = sup.resamplers("EURUSD")
+        assert rebuilt is not None
+    finally:
+        await store.dispose()

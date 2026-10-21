@@ -264,8 +264,15 @@ class IngestSupervisor:
             for b in await self._store.load_bars(instrument, tf)
         }
 
+        # With the configured anchors, like the constructor. Without them this fell back to
+        # DEFAULT_ANCHORS while live ingest used `data.anchors`, so overriding the D1 or W1
+        # anchor would have made live and replay disagree by construction -- and reported it
+        # as non-determinism in the analysis.
         self._resamplers[instrument] = ResamplerSet(
-            instrument, self._timeframes, min_constituents_frac=self._cfg.data.min_constituents_frac
+            instrument,
+            self._timeframes,
+            self._anchors,
+            min_constituents_frac=self._cfg.data.min_constituents_frac,
         )
         for candle in candles:
             self._repo.add_m1(candle)
@@ -275,7 +282,13 @@ class IngestSupervisor:
                 if persist_bars:
                     await self._store.upsert_bars([bar], replace=True)
                 prior = stored_bars.get((bar.timeframe, bar.open_time))
-                if verify_determinism and prior is not None and prior != bar:
+                # A bar that opened before the replay window is rebuilt from only the part
+                # of itself inside it, so of course it differs from the stored whole. That
+                # is the window boundary, not a non-deterministic analysis path, and
+                # reporting it as a hard failure cost the alert its meaning -- a W1 bar is
+                # partial for up to a week at every restart.
+                comparable = bar.open_time >= since
+                if verify_determinism and comparable and prior is not None and prior != bar:
                     self.stats.determinism_mismatches += 1
                     _log.error(
                         "recomputed bar differs from stored bar",
