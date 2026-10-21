@@ -237,7 +237,10 @@ cannot be quietly revised afterwards.
   | session gates | 211 | 1.3% | `session:no_signal_window` |
 
   A further 10,068 evaluations died earlier, inside the warm-up, at
-  `bias:htf_structure_unavailable`. **This is a measurement of the generator, not of the
+  `bias:htf_structure_unavailable`. Two full replays of the year produce an identical
+  decision digest and an identical funnel, so the replay is deterministic across all 26,879
+  decisions — not merely across an empty trade ledger, which is all the earlier check
+  compared. **This is a measurement of the generator, not of the
   market**: synthetic drift-plus-noise does not contain the sweep-then-displacement
   structure the entry models require, so a near-zero at the entry model is close to
   expected and tells us nothing about a real emission rate. The run's value was as a
@@ -278,9 +281,10 @@ cannot be quietly revised afterwards.
   definition (`docs/02-definitions.md` §4.1), not a startup bug, and the only remedies are
   backfilled history or a weaker bias definition — the second of which would be a parameter
   change requiring a trial.
-- **Backtest throughput is ~5.7 seconds per instrument-week of M1** after optimisation
+- **Backtest throughput is ~5.5 seconds per instrument-week of M1** after optimisation
   (down from 16s: suffix extrema for FVG fill tracking, bisected BPR pairing, one shared ATR
-  pass, KDE refit on D1 close only). A single-instrument five-year walk-forward is therefore
+  pass, KDE refit on D1 close only), re-measured after the array-availability fix enlarged
+  the candidate array population. A single-instrument five-year walk-forward is therefore
   ~25 minutes of CPU, and the six-instrument grid is the cost that actually constrains how
   many trials are affordable in wall-clock terms — separately from how many are affordable
   statistically.
