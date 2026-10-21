@@ -62,27 +62,29 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **408 tests**, `ruff` clean, `mypy --strict` clean on 83 source files.
+Current state: **438 tests**, `ruff` clean, `mypy --strict` clean on 82 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
 |---|---|---|
-| `analysis/` | **91%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
-| `core/` | 93% | |
+| `core/` | 94% | |
+| `analysis/` | **92%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
 | `sessions/` | 92% | |
 | `data/` | 88% | |
-| `signals/` | 76% | `engine.py` 49%, `entries.py` 42% -- see below |
-| `backtest/` | 72% | |
+| `backtest/` | 87% | |
+| `features/` | 86% | |
+| `signals/` | 77% | `engine.py` 56%, `entries.py` 42% -- see below |
 | `notify/` | 72% | |
-| `runtime/` | **15%** | `app.py` is the composition root: asyncio wiring, reconnect loops, signal handlers |
-| Total | 81% | |
+| `runtime/` | 47% | `app.py` is the composition root: asyncio wiring, reconnect loops, signal handlers |
+| Total | 85% | |
 
-The two weak numbers are stated rather than papered over. `signals/engine.py` at 49% and
-`runtime/app.py` at 15% are both covered end-to-end by the backtest runner replaying M1
-through the real engine, but a unit-coverage counter does not see that, and unit tests for an
-asyncio composition root mostly assert that mocks were called. The honest reading is that the
-engine's *decision* logic is well covered and its *wiring* is not, and the wiring is what the
-Phase 2E pilot exercises first.
+The weak numbers are stated rather than papered over. `signals/entries.py` at 42% and
+`runtime/app.py` at 40% are the two real gaps. Both are exercised end-to-end -- the entry
+models by the backtest runner replaying M1 through the live engine, the composition root by
+constructing the app and driving its alert path -- but a unit-coverage counter sees only the
+lines a direct test touches, and unit tests for an asyncio composition root mostly assert
+that mocks were called. The honest reading is that decision logic is well covered and
+process wiring is not, and process wiring is what the Phase 2E pilot exercises first.
 
 What exists and is tested:
 
@@ -197,17 +199,30 @@ cannot be quietly revised afterwards.
 - The reported Sharpe is **deflated** for the number of effectively independent trials.
   Effective trial count is estimated, not assumed equal to the raw grid size.
 - **The emission rate — the single number the whole power analysis rests on — is still
-  unmeasured.** A full synthetic year on XAUUSD produced 26,879 evaluations and **zero
-  emitted signals**: 51.4% died at the HTF bias gate, 45.8% at the entry model, 2.8% at the
-  HTF array check. Two causes, only one of them fixable. The synthetic generator produces
-  drift and noise but not the sweep-then-displacement structure the entry models require, so
-  a zero there is close to expected. The other was a real defect: the runner never set
-  `silver_bullet_window_start`, which silently collapsed a two-entry-model design to one
-  across the entire run. That is fixed and pinned by a test. But every trade-count figure in
-  `docs/07` remains a projection from assumed frequencies, and the pilot's first obligation
-  is to replace it with a measurement. If the measured rate is materially below the base
-  case, the module cut in `docs/07` §7 tightens further, possibly to zero
-  selection-eligible modules.
+  unmeasured.** A full synthetic year on XAUUSD (403,200 M1 bars, 26,879 M15 evaluations)
+  emitted **zero signals**. The funnel, after the W1 warm-up elapses (16,811 evaluations):
+
+  | Terminal step | Count | Share of post-warm-up | Dominant reason |
+  |---|---|---|---|
+  | entry model | 11,670 | 69.4% | `entry:no_model_fired` |
+  | HTF bias | 3,741 | 22.3% | `bias:no_directional_structure` |
+  | HTF array | 747 | 4.4% | `pd:no_htf_array_in_range` |
+  | features | 442 | 2.6% | `warmup:sweep_depth_atr` |
+  | session gates | 211 | 1.3% | `session:no_signal_window` |
+
+  A further 10,068 evaluations died earlier, inside the warm-up, at
+  `bias:htf_structure_unavailable`. **This is a measurement of the generator, not of the
+  market**: synthetic drift-plus-noise does not contain the sweep-then-displacement
+  structure the entry models require, so a near-zero at the entry model is close to
+  expected and tells us nothing about a real emission rate. The run's value was as a
+  defect detector, and it found one: the runner never set `silver_bullet_window_start`,
+  silently collapsing a two-entry-model design to one across the whole year. With that
+  fixed, 653 evaluations now reach past the entry model that previously could not — the
+  second model's entire contribution, which the earlier run reported as nothing. Every
+  trade-count figure in `docs/07` therefore remains a projection from assumed frequencies,
+  and the pilot's first obligation is to replace it with a measurement on purchased
+  history. If the measured rate is materially below the base case, the module cut in
+  `docs/07` §7 tightens further, possibly to zero selection-eligible modules.
 
 **Operational**
 

@@ -1,16 +1,17 @@
-"""Backtester: costs, metrics, walk-forward, ablation, report."""
+"""Backtester: costs, metrics, walk-forward, ablation, report, the replay runner."""
 
 from __future__ import annotations
 
 import math
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from aurion.analysis.base import Direction
+from aurion.analysis.registry import AnalysisParams, ObjectStore
 from aurion.backtest.ablation import (
     TIER1_ARM_ORDER,
     Branch,
@@ -54,6 +55,7 @@ from aurion.backtest.metrics import (
     widest,
 )
 from aurion.backtest.report import MIN_OOS_TRADES, ValidationReport, monte_carlo_sections
+from aurion.backtest.runner import BacktestRunner, RunnerConfig
 from aurion.backtest.walkforward import (
     LabelledEvent,
     build_plan,
@@ -61,8 +63,15 @@ from aurion.backtest.walkforward import (
     max_label_horizon,
     purge_and_embargo,
 )
-from aurion.core.timeframe import UTC
+from aurion.core.timeframe import DEFAULT_ANCHORS, UTC, Anchor, TimeFrame, bucketer
+from aurion.data.resample import ResamplerSet
+from aurion.data.types import OHLC, M1Candle
 from aurion.features.schema import Tag
+from aurion.sessions.calendar import StaticCalendarProvider
+from aurion.sessions.gates import AdmissibilityGate, build_window_set
+from aurion.sessions.spread import SpreadTracker
+from aurion.signals.engine import EngineParams, InstrumentMeta, SignalEngine
+from aurion.signals.model import ConstantProbabilityModel
 
 T0 = datetime(2024, 6, 12, 9, 0, tzinfo=UTC)
 
@@ -119,12 +128,40 @@ def test_commission_charges_both_sides():
 
 def test_rollover_crossing_is_detected():
     """The share of trades crossing it decides whether financing must be modelled."""
+    # June: EDT, so 17:00 NY is 21:00 UTC.
     assert holds_through_rollover(
         datetime(2024, 6, 12, 20, 0, tzinfo=UTC), datetime(2024, 6, 12, 22, 0, tzinfo=UTC)
     )
     assert not holds_through_rollover(
         datetime(2024, 6, 12, 9, 0, tzinfo=UTC), datetime(2024, 6, 12, 12, 0, tzinfo=UTC)
     )
+
+
+def test_rollover_follows_new_york_rather_than_a_fixed_utc_hour():
+    """January is EST: 17:00 NY is 22:00 UTC, not 21:00.
+
+    A fixed 21:00 UTC boundary got both of these wrong in opposite directions for the ~4.5
+    months a year the US is on standard time, and `rollover_share` is an acceptance
+    criterion rather than a diagnostic.
+    """
+    assert not holds_through_rollover(
+        datetime(2024, 1, 10, 20, 0, tzinfo=UTC), datetime(2024, 1, 10, 21, 30, tzinfo=UTC)
+    )
+    assert holds_through_rollover(
+        datetime(2024, 1, 10, 21, 30, tzinfo=UTC), datetime(2024, 1, 10, 22, 30, tzinfo=UTC)
+    )
+
+
+def test_a_zero_length_trade_crosses_nothing():
+    t = datetime(2024, 1, 10, 22, 0, tzinfo=UTC)
+    assert not holds_through_rollover(t, t)
+
+
+def test_modelled_spread_refuses_rather_than_impersonating_the_historical_one():
+    """A setting that silently does something other than its name is worse than a crash."""
+    params = CostParams(spread_model=SpreadModel.MODELLED, fixed_spread=0.2)
+    with pytest.raises(NotImplementedError, match="fitted spread distribution"):
+        effective_spread(params, 0.3, datetime(2024, 6, 12, 12, 0, tzinfo=UTC))
 
 
 # -- metrics -----------------------------------------------------------------
@@ -512,3 +549,136 @@ def test_report_writes_both_files():
         md, js = _report().write(td)
         assert md.exists() and js.exists()
         assert md.read_text(encoding="utf-8").startswith("# Aurion validation report")
+
+
+# -- the replay runner -------------------------------------------------------
+# These are the only tests that exercise the class producing every validated number. They
+# assert the structural properties -- accounting, determinism, which config reaches the
+# replay -- not profitability: a series short enough for a unit test cannot contain the
+# two confirmed W1 swings per side the bias gate needs, so zero emissions is the expected
+# outcome and an emission count would be the wrong thing to assert.
+_INST = "XAUUSD"
+
+
+def _replay_m1(minutes: int = 60 * 24 * 3) -> list[M1Candle]:
+    """Deterministic M1 with a weekend hole, in instrument units rather than FX pips."""
+    out: list[M1Candle] = []
+    t = datetime(2024, 6, 12, 0, 0, tzinfo=UTC)  # a Wednesday
+    price = 2300.0
+    for i in range(minutes):
+        step = math.sin(i * 0.017) * 0.45 + math.cos(i * 0.0031) * 0.2
+        price += step
+        o, c = price, price + step * 0.4
+        hi, lo = max(o, c) + 0.12, min(o, c) - 0.12
+        half = 0.09
+        out.append(
+            M1Candle(
+                _INST,
+                t,
+                t + timedelta(minutes=1),
+                OHLC(o - half, hi - half, lo - half, c - half),
+                OHLC(o + half, hi + half, lo + half, c + half),
+                60 + (i % 40),
+            )
+        )
+        t += timedelta(minutes=1)
+    return out
+
+
+def _runner(cfg, anchors: dict[TimeFrame, Anchor] | None = None) -> BacktestRunner:
+    tracker = SpreadTracker(
+        tz="America/New_York", bucket_minutes=15, window_obs=20, max_median_mult=99.0
+    )
+    windows = build_window_set(cfg)
+    gate = AdmissibilityGate(cfg, windows, tracker, StaticCalendarProvider([]))
+    params = AnalysisParams(point=0.01, swing_half_width=2)
+    store = ObjectStore(params)
+    engine = SignalEngine(
+        EngineParams(require_w1_d1_agreement=False, rr_min=2.0, expected_r_min=0.0, p_floor=0.0),
+        store,
+        gate,
+        {_INST: InstrumentMeta(0.01, 100.0, "XAU", "USD")},
+        ConstantProbabilityModel(p=0.45),
+    )
+    return BacktestRunner(
+        RunnerConfig(entry_timeframe=TimeFrame.M15, windows=windows, anchors=anchors),
+        engine,
+        gate,
+        store,
+        CostParams(point=0.01),
+        params,
+        {_INST: 0.01},
+    )
+
+
+def test_the_funnel_accounts_for_every_evaluation(cfg):
+    """Rejections plus emissions must equal evaluations, or the funnel is not a measurement.
+
+    An off-by-one here would be invisible in any single percentage and would silently
+    misattribute which gate is doing the filtering -- the quantity the module cut rests on.
+    """
+    result = _runner(cfg).run({_INST: _replay_m1()}, config_hash="t")
+    assert result.evaluations > 0
+    assert sum(result.funnel.by_step.values()) + result.funnel.emitted == result.funnel.evaluated
+    assert result.funnel.evaluated == result.evaluations
+    assert sum(result.funnel.by_reason.values()) == sum(result.funnel.by_step.values())
+
+
+def test_a_replay_is_deterministic(cfg):
+    candles = _replay_m1()
+    first = _runner(cfg).run({_INST: candles}, config_hash="t")
+    second = _runner(cfg).run({_INST: candles}, config_hash="t")
+    assert first.ledger_digest() == second.ledger_digest()
+    assert (first.evaluations, first.funnel.emitted) == (second.evaluations, second.funnel.emitted)
+
+
+def test_the_disclaimer_travels_with_the_result(cfg):
+    """No code path produces numbers without it."""
+    result = _runner(cfg).run({_INST: _replay_m1(600)}, config_hash="t")
+    assert "not predictions" in result.disclaimer
+
+
+def test_an_empty_input_is_an_empty_result_not_a_crash(cfg):
+    result = _runner(cfg).run({}, config_hash="t")
+    assert (result.evaluations, result.trades, result.funnel.evaluated) == (0, [], 0)
+
+
+def test_max_evaluations_bounds_the_run(cfg):
+    result = _runner(cfg).run({_INST: _replay_m1()}, config_hash="t", max_evaluations=25)
+    assert result.evaluations == 25
+
+
+def test_the_rollover_boundary_follows_the_configured_anchor():
+    """`data.anchors` was declared, validated, and then ignored by every bucketer.
+
+    Resampling on one definition of a day while reporting on another is the failure this
+    pins: the H4/D1 anchor is a contested prior with a planned robustness run (Q2), so an
+    override that changed nothing would have tested nothing.
+    """
+    opened = datetime(2024, 6, 12, 23, 0, tzinfo=UTC)
+    closed = datetime(2024, 6, 13, 1, 0, tzinfo=UTC)
+    utc_day = bucketer(TimeFrame.D1, Anchor("UTC", time(0, 0)))
+    # 17:00 NY is 21:00 UTC in June, so both instants are in the same FX day ...
+    assert not holds_through_rollover(opened, closed)
+    # ... and in different UTC days.
+    assert holds_through_rollover(opened, closed, utc_day)
+
+
+def test_a_configured_anchor_reaches_the_resampler():
+    candles = _replay_m1()
+    ny = ResamplerSet(_INST, (TimeFrame.D1,))
+    utc = ResamplerSet(_INST, (TimeFrame.D1,), {TimeFrame.D1: Anchor("UTC", time(0, 0))})
+    ny_bars = [b for c in candles for b in ny.push(c)]
+    utc_bars = [b for c in candles for b in utc.push(c)]
+    assert ny_bars and utc_bars
+    # The default anchor closes the FX day at 21:00 UTC in June; the override at midnight.
+    assert {b.open_time.hour for b in ny_bars} == {21}
+    assert {b.open_time.hour for b in utc_bars} == {0}
+
+
+def test_the_declared_anchors_parse_and_match_the_defaults(cfg):
+    """A behaviour-preserving check: wiring the config must not have moved any boundary."""
+    anchors = cfg.anchors()
+    assert anchors[TimeFrame.D1] == DEFAULT_ANCHORS[TimeFrame.D1]
+    assert anchors[TimeFrame.W1] == DEFAULT_ANCHORS[TimeFrame.W1]
+    assert anchors[TimeFrame.M15] == DEFAULT_ANCHORS[TimeFrame.M15]

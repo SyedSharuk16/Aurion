@@ -77,9 +77,13 @@ class IngestSupervisor:
         # under SimClock during replay (docs/01-architecture.md §4).
         self._clock: Clock = clock or WallClock()
         self._timeframes = tuple(TimeFrame(t) for t in cfg.data.timeframes)
+        self._anchors = cfg.anchors()
         self._resamplers: dict[str, ResamplerSet] = {
             sym: ResamplerSet(
-                sym, self._timeframes, min_constituents_frac=cfg.data.min_constituents_frac
+                sym,
+                self._timeframes,
+                self._anchors,
+                min_constituents_frac=cfg.data.min_constituents_frac,
             )
             for sym in cfg.enabled_instruments
         }
@@ -196,7 +200,7 @@ class IngestSupervisor:
             for tf in self._timeframes:
                 if tf.is_base:
                     continue
-                aligned = Bucketer(tf).bucket(earliest).open_time
+                aligned = Bucketer(tf, self._anchors.get(tf)).bucket(earliest).open_time
                 await self._store.delete_bars_from(instrument, aligned, tf)
             self._repo.clear(instrument)
             self.stats.last_candle_at.pop(instrument, None)

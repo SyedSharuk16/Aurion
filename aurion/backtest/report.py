@@ -37,7 +37,15 @@ from aurion.backtest.metrics import (
 #: `docs/04` §8 criterion 5, revised: the count at which a paired-CRN arm resolves a
 #: 0.20R effect at f = 0.5. The withdrawn criterion (>=200 holdout trades) was unmeetable.
 MIN_OOS_TRADES = 341
+#: `docs/04` §8 criterion 3, unchanged from Phase 1.
 DSR_TARGET = 0.95
+#: Both are **priors** and are stated as such: no measurement fixes either. The first is
+#: the share of trades decided by the same-M1-bar SL/TP tie-break above which the headline
+#: figures are substantially that assumption rather than the strategy (`docs/06` A16); the
+#: second is the share of trades held through 17:00 NY above which unmodelled overnight
+#: financing can plausibly move expectancy by more than the effects being measured. Each
+#: triggers a warning and a sensitivity run, never a silent pass, which is why a wrong
+#: value costs a re-run rather than a false conclusion.
 TIE_BREAK_WARN = 0.05
 ROLLOVER_WARN = 0.10
 

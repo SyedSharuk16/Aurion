@@ -249,6 +249,12 @@ class LogisticModel:
         return cls.from_json(Path(path).read_text(encoding="utf-8"))
 
 
+#: `docs/03` §3.2. A **prior**, not a derived quantity: the events-per-variable
+#: literature puts the floor for a usable logistic fit at 10 (Peduzzi et al. 1996) and 20
+#: is the conservative choice here because a calibration map is fitted on top of the
+#: coefficients, consuming degrees of freedom the EPV rule does not account for. It has
+#: no backtest justification and cannot have one: it governs whether a fit is attempted
+#: at all, so it is not a parameter the backtest can search over.
 MIN_EVENTS_PER_FEATURE = 20
 
 

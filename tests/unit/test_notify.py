@@ -1,4 +1,4 @@
-"""Telegram formatting, outbox idempotency, commands, health alerts, logging."""
+"""Telegram formatting, outbox idempotency, commands, health alerts, logging, preflight."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import pytest
 from aurion import BACKTEST_DISCLAIMER
 from aurion.analysis.base import Direction
 from aurion.config.models import load_config
+from aurion.core.clock import SimClock
 from aurion.core.timeframe import UTC
 from aurion.data.store import Store
 from aurion.notify.health import AlertKind, HealthMonitor
@@ -49,6 +50,7 @@ from aurion.notify.telegram.outbox import (
     TokenBucket,
     dedupe_key,
 )
+from aurion.runtime.app import AurionApp, preflight
 from aurion.runtime.logging import JsonFormatter, configure, log_candidate, redact
 from aurion.sessions.gates import build_window_set
 from aurion.signals.engine import Candidate, Step
@@ -434,3 +436,107 @@ def test_configure_is_idempotent():
     first = len(logging.getLogger().handlers)
     configure(level="INFO", json_format=True)
     assert len(logging.getLogger().handlers) == first
+
+
+# -- startup preflight -------------------------------------------------------
+_FULL_ENV = {
+    "AURION_OANDA_API_TOKEN": "t",
+    "AURION_OANDA_ACCOUNT_ID": "a",
+    "AURION_TELEGRAM_BOT_TOKEN": "b",
+    "AURION_TELEGRAM_SIGNAL_CHAT_ID": "-100",
+    "AURION_TELEGRAM_ADMIN_CHAT_ID": "-101",
+    "AURION_TELEGRAM_ALLOWED_USER_IDS": "7",
+}
+
+
+def test_a_complete_environment_reports_nothing():
+    assert preflight(_FULL_ENV, "paper") == []
+
+
+def test_whitespace_is_not_a_value():
+    env = {**_FULL_ENV, "AURION_TELEGRAM_BOT_TOKEN": "   "}
+    assert [f.variable for f in preflight(env, "paper")] == ["AURION_TELEGRAM_BOT_TOKEN"]
+
+
+def test_paper_mode_treats_a_missing_delivery_channel_as_fatal():
+    """A paper-forward run that cannot deliver is indistinguishable from one with no signals."""
+    env = {k: v for k, v in _FULL_ENV.items() if k != "AURION_TELEGRAM_SIGNAL_CHAT_ID"}
+    findings = preflight(env, "paper")
+    assert [f.variable for f in findings] == ["AURION_TELEGRAM_SIGNAL_CHAT_ID"]
+    assert findings[0].fatal
+
+
+def test_backtest_mode_needs_neither_a_stream_nor_a_channel():
+    findings = preflight({}, "backtest")
+    assert len(findings) == len(_FULL_ENV)
+    assert not any(f.fatal for f in findings)
+
+
+def test_an_empty_allowlist_warns_but_does_not_block_startup():
+    """Fail-closed authorisation is correct; failing closed in silence is not."""
+    env = {k: v for k, v in _FULL_ENV.items() if k != "AURION_TELEGRAM_ALLOWED_USER_IDS"}
+    findings = preflight(env, "live_alerts")
+    assert [f.variable for f in findings] == ["AURION_TELEGRAM_ALLOWED_USER_IDS"]
+    assert not findings[0].fatal
+    assert "every command is ignored" in findings[0].render()
+
+
+def test_every_finding_names_the_consequence_not_just_the_variable():
+    for finding in preflight({}, "live_alerts"):
+        assert finding.render().startswith(finding.variable + " is unset or empty: ")
+        assert len(finding.consequence.split()) >= 4
+
+
+# -- alert routing -----------------------------------------------------------
+class _NullAdapter:
+    """Satisfies the adapter protocol without doing anything. Construction only."""
+
+    name = "null"
+
+    def to_vendor_symbol(self, instrument: str) -> str:
+        return instrument
+
+    def to_canonical(self, vendor_symbol: str) -> str:
+        return vendor_symbol
+
+    async def fetch_candles(self, instrument, granularity="M1", start_utc=None, end_utc=None):
+        return []
+
+    def stream_prices(self, instruments):  # pragma: no cover - construction only
+        raise NotImplementedError
+
+    async def latest_quote(self, instrument):  # pragma: no cover
+        raise NotImplementedError
+
+    async def health(self):  # pragma: no cover
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _app(store, cfg, admin: str) -> AurionApp:
+    return AurionApp(
+        cfg,
+        _NullAdapter(),
+        store,
+        telegram=TelegramSettings("tok", "-1001", admin, frozenset({"7"})),
+        clock=SimClock(T0),
+    )
+
+
+async def test_a_health_alert_goes_to_the_admin_chat_when_one_is_configured(store, cfg):
+    await _app(store, cfg, "-1002")._alert("calendar unavailable", "calendar_outage")
+    async with store.session() as session:
+        assert [row.chat_id for row in await Outbox().due(session, T0)] == ["-1002"]
+
+
+async def test_a_health_alert_falls_back_to_the_signal_chat(store, cfg):
+    """fail_safe=block makes the outage alert the only explanation for the silence.
+
+    Dropping it because the admin chat is unset leaves an operator with a running process,
+    no signals, and nothing anywhere that says why.
+    """
+    await _app(store, cfg, "")._alert("calendar unavailable", "calendar_outage")
+    async with store.session() as session:
+        assert [row.chat_id for row in await Outbox().due(session, T0)] == ["-1001"]

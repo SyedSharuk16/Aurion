@@ -257,3 +257,41 @@ class Bucketer:
 @lru_cache(maxsize=64)
 def bucketer(timeframe: TimeFrame, anchor: Anchor | None = None) -> Bucketer:
     return Bucketer(timeframe, anchor)
+
+
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def parse_anchor(spec: str) -> Anchor:
+    """Parse an anchor as `config.yaml` writes it.
+
+    Accepted: ``"00:00 UTC"``, ``"17:00 America/New_York"``, ``"Sun 17:00 America/New_York"``.
+
+    This exists because `data.anchors` was a *declared but unread* config section: the
+    validator checked that every enabled timeframe had an anchor, the code used
+    `DEFAULT_ANCHORS` regardless, and the H4/D1 anchor is a contested `prior` whose
+    robustness alternative (Q2) would therefore have silently tested nothing.
+    """
+    parts = spec.split()
+    weekday: int | None = None
+    if len(parts) == 3:
+        key = parts[0].lower()[:3]
+        if key not in _WEEKDAYS:
+            raise ValueError(f"anchor {spec!r}: {parts[0]!r} is not a weekday")
+        weekday = _WEEKDAYS[key]
+        parts = parts[1:]
+    if len(parts) != 2:
+        raise ValueError(f"anchor {spec!r} is not '[Ddd ]HH:MM <IANA zone>'")
+    hhmm, zone_name = parts
+    hh, _, mm = hhmm.partition(":")
+    if not (hh.isdigit() and mm.isdigit()):
+        raise ValueError(f"anchor {spec!r}: {hhmm!r} is not HH:MM")
+    try:
+        at = time(int(hh), int(mm))
+    except ValueError as exc:
+        raise ValueError(f"anchor {spec!r}: {exc}") from exc
+    try:
+        _zone(zone_name)
+    except Exception as exc:  # zoneinfo raises several types for a bad name
+        raise ValueError(f"anchor {spec!r}: unknown time zone {zone_name!r}") from exc
+    return Anchor(zone_name, at, weekday=weekday)

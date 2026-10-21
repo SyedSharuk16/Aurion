@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
 
 from aurion.analysis.base import Direction
+from aurion.core.timeframe import Bucketer, TimeFrame
 
 
 class SpreadModel(StrEnum):
@@ -93,7 +94,14 @@ def effective_spread(
     elif params.spread_model is SpreadModel.HISTORICAL:
         base = observed_spread if observed_spread is not None else params.fixed_spread
     else:
-        base = observed_spread if observed_spread is not None else params.fixed_spread
+        # MODELLED exists for a mid-only vendor (`data/adapters/twelvedata.py`), where the
+        # spread has to be estimated from a fitted distribution rather than observed. That
+        # estimator does not exist, and silently returning the historical value would make
+        # `spread_model: modelled` a setting that lies about what it does.
+        raise NotImplementedError(
+            "spread_model=modelled needs a fitted spread distribution, which is not "
+            "implemented. Use a bid/ask adapter with spread_model=historical."
+        )
     return max(base, 0.0) * news_widening(params, at, nearest_event)
 
 
@@ -137,22 +145,31 @@ def commission_cost(params: CostParams, lots: float) -> float:
     return 2.0 * params.commission_per_lot_per_side * max(lots, 0.0)
 
 
+#: The default D1 anchor: 17:00 America/New_York, the broker FX day. That is 21:00 UTC under
+#: EDT and 22:00 UTC under EST, so the boundary has to come from the bucketer, which
+#: generates boundaries in local time. A fixed UTC hour misclassifies every trade spanning
+#: 21:00-22:00 UTC for the ~4.5 months a year the US is on standard time -- in both
+#: directions -- and `rollover_share` is an acceptance criterion, not a diagnostic.
+_FX_DAY = Bucketer(TimeFrame.D1)
+
+
 def holds_through_rollover(
-    opened: datetime, closed: datetime, rollover_hour_utc: int = 21
+    opened: datetime, closed: datetime, fx_day: Bucketer | None = None
 ) -> bool:
     """Whether a trade spanned the 17:00 NY rollover.
+
+    Defined as the open and close falling in different FX days, using the same bucketer the
+    D1 bars use -- so a trade counted as crossing rollover is exactly a trade whose entry
+    and exit sit in different D1 bars, with no second definition to drift from it. Pass
+    ``fx_day`` built from ``data.anchors.D1`` whenever that anchor is overridden; the
+    default stands in only for callers with no config in hand.
 
     Overnight financing is not modelled, on the grounds that intraday signals with a
     same-session expiry rarely cross rollover. The **share of trades that do** is reported,
     and above 10% financing must be added before the results are trusted. That is the check
     that keeps the omission honest.
     """
-    cursor = opened
-    while cursor < closed:
-        boundary = cursor.replace(hour=rollover_hour_utc, minute=0, second=0, microsecond=0)
-        if opened <= boundary < closed:
-            return True
-        cursor = cursor + timedelta(days=1)
-        if (cursor - opened) > timedelta(days=14):
-            break
-    return False
+    if closed <= opened:
+        return False
+    day = fx_day if fx_day is not None else _FX_DAY
+    return day.open_time(opened) != day.open_time(closed)

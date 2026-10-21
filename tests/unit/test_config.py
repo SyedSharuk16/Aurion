@@ -9,6 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from aurion.config.models import AurionConfig, load_config
+from aurion.core.timeframe import TimeFrame
 
 
 @pytest.fixture
@@ -114,3 +115,25 @@ def test_negative_point_is_rejected(raw):
     raw["instruments"]["XAUUSD"]["point"] = -0.01
     with pytest.raises(ValidationError):
         AurionConfig.model_validate(raw)
+
+
+def test_an_unparseable_anchor_fails_at_load(raw):
+    """The anchors section is read, not merely validated for presence."""
+    raw = copy.deepcopy(raw)
+    raw["data"]["anchors"]["D1"] = "17:00 Mars/Olympus"
+    with pytest.raises(ValidationError):
+        AurionConfig.model_validate(raw)
+
+
+def test_an_anchor_for_an_unknown_timeframe_fails_at_load(raw):
+    raw = copy.deepcopy(raw)
+    raw["data"]["anchors"]["M7"] = "00:00 UTC"
+    with pytest.raises(ValidationError):
+        AurionConfig.model_validate(raw)
+
+
+def test_declared_anchors_are_exposed_as_parsed_objects():
+    anchors = load_config("config.yaml").anchors()
+    assert anchors[TimeFrame.D1].tz == "America/New_York"
+    assert anchors[TimeFrame.W1].weekday == 6
+    assert anchors[TimeFrame.M15].tz == "UTC"

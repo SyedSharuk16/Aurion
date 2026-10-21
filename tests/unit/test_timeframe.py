@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from aurion.core.timeframe import UTC, Bucketer, TimeFrame
+from aurion.core.timeframe import UTC, Anchor, Bucketer, TimeFrame, parse_anchor
 
 NY = ZoneInfo("America/New_York")
 
@@ -120,3 +120,22 @@ def test_exactly_one_irregular_bar_per_transition():
                 prev = bucket
             ts += timedelta(minutes=1)
         assert sum(1 for s in seen if s.dst_irregular) == 1
+
+
+# -- anchor parsing ----------------------------------------------------------
+def test_anchor_specs_parse_in_the_three_shapes_config_uses():
+    assert parse_anchor("00:00 UTC") == Anchor("UTC", time(0, 0))
+    assert parse_anchor("17:00 America/New_York") == Anchor("America/New_York", time(17, 0))
+    assert parse_anchor("Sun 17:00 America/New_York") == Anchor(
+        "America/New_York", time(17, 0), weekday=6
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["17:00", "Xyz 17:00 UTC", "25:00 UTC", "17:61 UTC", "17:aa UTC", "17:00 Mars/Olympus", ""],
+)
+def test_a_malformed_anchor_is_rejected_at_parse_time(spec):
+    """A bad anchor must stop the process before it ingests a bar, not at the first D1 close."""
+    with pytest.raises(ValueError):
+        parse_anchor(spec)

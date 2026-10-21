@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -195,13 +196,19 @@ class AurionApp:
         task.add_done_callback(self._pending.discard)
 
     async def _alert(self, text: str, key: str) -> None:
-        if not self.telegram.admin_chat_id:
-            _log.warning("admin alert with no chat configured", extra={"alert": key})
+        # Falls back to the signal chat rather than dropping the alert. A calendar outage
+        # blocks every signal under fail_safe=block, so an unconfigured admin chat would make
+        # the one message that explains the silence the one message nobody receives.
+        chat = self.telegram.admin_chat_id or self.telegram.signal_chat_id
+        if not chat:
+            _log.warning("health alert with no chat configured", extra={"alert": key})
             return
+        if not self.telegram.admin_chat_id:
+            _log.warning("health alert routed to the signal chat", extra={"alert": key})
         async with self.store.session() as session, session.begin():
             await self.outbox.enqueue(
                 session,
-                OutboxMessage(key, self.telegram.admin_chat_id, OutboxKind.HEALTH, text),
+                OutboxMessage(key, chat, OutboxKind.HEALTH, text),
                 self.clock.now(),
             )
 
@@ -450,6 +457,53 @@ class AurionApp:
                 loop.add_signal_handler(signum, self._stop.set)
 
 
+#: Variables the process cannot do its job without, each with the thing that silently stops
+#: working when it is missing. A missing variable must not yield a process that looks healthy
+#: and delivers nothing: that is worse than a crash, because nothing ever asks why it is
+#: quiet. The third field marks the ones that are fatal outside `backtest` mode -- the only
+#: mode that legitimately has neither a price stream nor a delivery channel.
+_REQUIRED_ENV: tuple[tuple[str, str, bool], ...] = (
+    ("AURION_OANDA_API_TOKEN", "the price stream cannot authenticate, so no bar ever closes", True),
+    ("AURION_OANDA_ACCOUNT_ID", "OANDA rejects the stream request", True),
+    ("AURION_TELEGRAM_BOT_TOKEN", "no signal, update or health alert can be delivered", True),
+    ("AURION_TELEGRAM_SIGNAL_CHAT_ID", "signals have nowhere to go", True),
+    (
+        "AURION_TELEGRAM_ADMIN_CHAT_ID",
+        "health alerts have nowhere to go, so a stalled feed is invisible",
+        False,
+    ),
+    (
+        "AURION_TELEGRAM_ALLOWED_USER_IDS",
+        "the allow-list fails closed, so every command is ignored without reply",
+        False,
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightFinding:
+    variable: str
+    consequence: str
+    fatal: bool
+
+    def render(self) -> str:
+        return f"{self.variable} is unset or empty: {self.consequence}"
+
+
+def preflight(env: Mapping[str, str], mode: str) -> list[PreflightFinding]:
+    """Missing-variable findings, in declaration order.
+
+    Does not raise and does not read `os.environ` itself, so the startup contract is
+    testable without mutating the process environment.
+    """
+    outside_backtest = mode != "backtest"
+    return [
+        PreflightFinding(name, consequence, fatal and outside_backtest)
+        for name, consequence, fatal in _REQUIRED_ENV
+        if not env.get(name, "").strip()
+    ]
+
+
 def build_app(config_path: str | Path | None = None) -> AurionApp:
     """Construct the live app from config and the environment."""
     cfg = load_config(config_path or os.environ.get("AURION_CONFIG_PATH", "config.yaml"))
@@ -467,6 +521,17 @@ def build_app(config_path: str | Path | None = None) -> AurionApp:
         stream_idle_timeout_s=cfg.adapter.stream_idle_timeout_s,
         points={s: i.point for s, i in cfg.enabled_instruments.items()},
     )
+    findings = preflight(os.environ, cfg.meta.mode)
+    for finding in findings:
+        _log.log(
+            logging.ERROR if finding.fatal else logging.WARNING, "preflight: %s", finding.render()
+        )
+    fatal = [f.variable for f in findings if f.fatal]
+    if fatal:
+        raise RuntimeError(
+            f"refusing to start in mode {cfg.meta.mode!r} without " + ", ".join(fatal)
+        )
+
     settings = TelegramSettings.from_env()
     transport = HttpTelegramTransport(settings.token) if settings.token else None
     return AurionApp(cfg, adapter, store, transport=transport)

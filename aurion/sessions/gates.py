@@ -67,7 +67,7 @@ class AdmissibilityGate:
         self._calendar = calendar
         self._has_active = has_active or (lambda _inst: False)
         self._on_calendar_outage = on_calendar_outage
-        self._w1_bucketer = Bucketer(TimeFrame.W1)
+        self._w1_bucketer = Bucketer(TimeFrame.W1, cfg.anchors().get(TimeFrame.W1))
         longest_override = max(cfg.news.event_overrides.values(), default=0)
         self._max_blackout = timedelta(
             minutes=max(cfg.news.blackout_minutes, longest_override)

@@ -30,7 +30,7 @@ from aurion.backtest.costs import CostParams, commission_cost, holds_through_rol
 from aurion.backtest.metrics import FunnelReport
 from aurion.core.clock import SimClock
 from aurion.core.marketview import MarketView
-from aurion.core.timeframe import UTC, TimeFrame
+from aurion.core.timeframe import UTC, Anchor, Bucketer, TimeFrame
 from aurion.data.repository import InMemoryBarRepository
 from aurion.data.resample import ResamplerSet
 from aurion.data.types import M1Candle
@@ -132,6 +132,10 @@ class RunnerConfig:
     #: Needed by the SILVER_BULLET_FVG model: without it that model can never fire, which
     #: silently reduced a two-model design to one in the first full-year run.
     windows: WindowSet | None = None
+    #: From `AurionConfig.anchors()`. Drives both the resamplers and the FX-day boundary the
+    #: rollover check uses, so a run on an alternative D1 anchor (the Q2 robustness run)
+    #: moves both together instead of resampling on one definition and reporting on another.
+    anchors: dict[TimeFrame, Anchor] | None = None
     htf_timeframes: tuple[TimeFrame, ...] = (
         TimeFrame.H1,
         TimeFrame.H4,
@@ -148,7 +152,7 @@ class RunnerConfig:
 class BacktestRunner:
     """Replays M1 candles through the live signal code."""
 
-    __slots__ = ("_cfg", "_costs", "_engine", "_gate", "_meta", "_params", "_store")
+    __slots__ = ("_cfg", "_costs", "_engine", "_fx_day", "_gate", "_meta", "_params", "_store")
 
     def __init__(
         self,
@@ -161,6 +165,9 @@ class BacktestRunner:
         instrument_points: dict[str, float],
     ) -> None:
         self._cfg = runner_cfg
+        self._fx_day = Bucketer(
+            TimeFrame.D1, (runner_cfg.anchors or {}).get(TimeFrame.D1)
+        )
         self._engine = engine
         self._gate = gate
         self._store = store
@@ -181,7 +188,9 @@ class BacktestRunner:
         instruments = sorted(candles)
         timeframes = (self._cfg.entry_timeframe, *self._cfg.htf_timeframes)
         repo = InMemoryBarRepository()
-        resamplers = {i: ResamplerSet(i, timeframes) for i in instruments}
+        resamplers = {
+            i: ResamplerSet(i, timeframes, self._cfg.anchors) for i in instruments
+        }
         lifecycle = LifecycleManager()
 
         merged: list[M1Candle] = sorted(
@@ -326,7 +335,7 @@ class BacktestRunner:
             realised_r=signal.realised_r,
             commission=commission_cost(self._costs, 0.0),
             tie_break_decided=signal.tie_break_decided,
-            held_through_rollover=holds_through_rollover(opened, closed_at),
+            held_through_rollover=holds_through_rollover(opened, closed_at, self._fx_day),
             session_label="",
             entry_model="",
             fold_id=self._cfg.fold_id,

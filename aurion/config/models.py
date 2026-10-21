@@ -15,6 +15,8 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aurion.core.timeframe import Anchor, TimeFrame, parse_anchor
+
 Strict = ConfigDict(extra="forbid")
 Frac = Annotated[float, Field(ge=0.0, le=1.0)]
 
@@ -260,7 +262,27 @@ class AurionConfig(BaseModel):
         for tf in self.data.timeframes:
             if tf not in self.data.anchors:
                 raise ValueError(f"data.timeframes includes {tf} with no anchor declared")
+        # Parse at load, not at the first bar. An unparseable anchor is a config error and
+        # must stop the process before it has ingested anything.
+        self.anchors()
         return self
+
+    def anchors(self) -> dict[TimeFrame, Anchor]:
+        """Declared anchors, parsed.
+
+        The resampler, the session gates and the rollover check all take their boundaries
+        from here, so changing `data.anchors.D1` changes every one of them together. Nothing
+        reads `DEFAULT_ANCHORS` on a configured path -- an anchor that moved in config but
+        not in the resampler would silently produce two different definitions of a day.
+        """
+        out: dict[TimeFrame, Anchor] = {}
+        for name, spec in self.data.anchors.items():
+            try:
+                tf = TimeFrame(name)
+            except ValueError as exc:
+                raise ValueError(f"data.anchors has unknown timeframe {name!r}") from exc
+            out[tf] = parse_anchor(spec)
+        return out
 
     @property
     def enabled_instruments(self) -> dict[str, InstrumentCfg]:

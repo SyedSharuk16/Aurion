@@ -38,8 +38,16 @@ def norm_ppf(p: float) -> float:
     return _N01.inv_cdf(p)
 
 
+#: Convention, not a tunable: the annualisation factor used throughout `docs/04` and
+#: `tools/power.py`. Both must use the same one or the deflated Sharpe disagrees with the
+#: power tables, and a cross-check test asserts they do not.
 TRADING_DAYS_PER_YEAR = 252
+#: Appears in the expected-maximum-Sharpe approximation g(N) (Bailey & Lopez de Prado).
 EULER_MASCHERONI = 0.5772156649015329
+#: A **prior**. Below ~30 trades a per-cell expectancy is dominated by sampling noise at
+#: the per-trade dispersion these systems show, so a breakout cell below it is reported as
+#: insufficient rather than given a number. Cells are descriptive and never gate a
+#: decision, so this threshold cannot bias a selection.
 MIN_CELL_TRADES = 30
 
 
