@@ -44,7 +44,11 @@ from aurion.notify.telegram.bot import (
     TelegramTransport,
 )
 from aurion.notify.telegram.charts import ChartAnnotation, render_signal_chart
-from aurion.notify.telegram.formatters import format_signal, format_transition
+from aurion.notify.telegram.formatters import (
+    format_signal,
+    format_signal_compact,
+    format_transition,
+)
 from aurion.notify.telegram.outbox import Outbox, OutboxKind, OutboxMessage, dedupe_key
 from aurion.runtime.env import load_dotenv
 from aurion.runtime.logging import configure, log_candidate
@@ -312,10 +316,12 @@ class AurionApp:
         self.state.emitted += 1
         self.health.counters.signals_emitted += 1
 
-        text = format_signal(
-            candidate,
-            self._points.get(instrument, 0.01),
-            paper=self.cfg.meta.mode != "live_alerts",
+        point = self._points.get(instrument, 0.01)
+        paper = self.cfg.meta.mode != "live_alerts"
+        text = (
+            format_signal_compact(candidate, point, paper=paper)
+            if self.cfg.notify.get("verbosity", "compact") == "compact"
+            else format_signal(candidate, point, paper=paper)
         )
         chart = await self._render_chart(candidate, view, instrument)
         async with self.store.session() as session, session.begin():

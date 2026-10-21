@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -50,6 +51,7 @@ from aurion.notify.telegram.formatters import (
     escape,
     format_rejection_digest,
     format_signal,
+    format_signal_compact,
     format_transition,
     price,
 )
@@ -1096,3 +1098,51 @@ def test_a_missing_env_file_is_not_an_error(tmp_path):
 def test_blank_and_malformed_lines_are_skipped():
     values, _ = parse_dotenv("\n\n# only a comment\nnot_an_assignment\n=novalue\nK=v\n")
     assert values == {"K": "v"}
+
+
+# -- compact format ----------------------------------------------------------
+def test_the_compact_format_carries_the_trade_and_the_probability():
+    """What you act on: side, entry, stop, targets with their R, and the probability.
+
+    The probability stays because dropping it makes a 0.46 signal indistinguishable from a
+    0.70 one at a glance -- the one simplification that would change decisions rather than
+    presentation."""
+    scored = replace(_emitted_candidate(), p_hat=0.46)
+    text = format_signal_compact(scored, 0.01, paper=True)
+    plain = text.replace("\\", "")
+    assert "XAUUSD LONG" in plain.replace("*", "")
+    assert "`2305.00`" in plain and "`2295.00`" in plain
+    assert "TP1" in plain and "(2.0R)" in plain
+    assert "p `0.46`" in plain
+    assert "[PAPER]" in plain
+    assert len(text.splitlines()) <= 6, "a phone notification is read in two seconds"
+
+
+def test_the_compact_format_omits_the_probability_when_there_is_none():
+    """Rather than printing a placeholder that reads like a real estimate."""
+    plain = format_signal_compact(_emitted_candidate(), 0.01).replace("\\", "")
+    assert "p `" not in plain
+    assert "NY /" in plain, "the timestamp still lands"
+
+
+def test_the_compact_format_is_valid_markdown_v2():
+    for paper in (True, False):
+        text = format_signal_compact(_emitted_candidate(), 0.01, paper=paper)
+        _assert_prose_is_escaped(text, f"compact paper={paper}")
+        _assert_code_spans_clean(text, f"compact paper={paper}")
+
+
+def test_both_formats_describe_the_same_trade():
+    """Presentation differs; the decision must not."""
+    candidate = _emitted_candidate()
+    compact = format_signal_compact(candidate, 0.01).replace("\\", "")
+    full = format_signal(candidate, 0.01).replace("\\", "")
+    for value in ("2305.00", "2295.00", "2325.00"):
+        assert value in compact and value in full
+
+
+def test_a_candidate_without_geometry_is_refused_by_both():
+    bare = Candidate("XAUUSD", T0, Step.HTF_BIAS, "bias:htf_structure_unavailable")
+    for formatter in (format_signal_compact, format_signal):
+        with pytest.raises(ValueError, match="without geometry"):
+            formatter(bare, 0.01)

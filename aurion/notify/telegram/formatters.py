@@ -135,6 +135,48 @@ DEFAULT_REASONS = ReasonText(
 )
 
 
+def format_signal_compact(
+    candidate: Candidate,
+    point: float,
+    paper: bool = True,
+) -> str:
+    """The trade, and nothing else. `notify.verbosity: compact`.
+
+    Entry, stop and targets are what you act on; the calibrated probability, its Brier
+    score and the log-odds attribution are what you audit afterwards. Both are kept, but a
+    phone notification is read in two seconds and the full form buries the three numbers
+    that matter under the evidence for them.
+
+    Confidence stays even here, as a bare probability. Removing it would make a 0.46 signal
+    indistinguishable from a 0.70 one at a glance, which is the one simplification that
+    changes decisions rather than presentation.
+    """
+    geometry = candidate.geometry
+    if geometry is None or candidate.direction is None:
+        raise ValueError("cannot format a candidate without geometry")
+
+    emoji = _DIRECTION_EMOJI[candidate.direction]
+    side = "LONG" if candidate.direction is Direction.UP else "SHORT"
+    lines = [
+        f"{emoji} *{escape(candidate.instrument)} {side}*{paper_tag(paper)}",
+        f"Entry  {code(price(geometry.entry, point))}",
+        f"SL     {code(price(geometry.stop_loss, point))}",
+    ]
+    for i, target in enumerate(geometry.targets, start=1):
+        r_multiple = target.r_multiple(geometry.entry, geometry.stop_loss)
+        lines.append(
+            f"TP{i}    {code(price(target.price, point))}  "
+            f"\\({escape(f'{r_multiple:.1f}')}R\\)"
+        )
+    if candidate.p_hat is not None:
+        lines.append(
+            f"p {code(f'{candidate.p_hat:.2f}')} \u00b7 {both_zones(candidate.as_of)}"
+        )
+    else:
+        lines.append(both_zones(candidate.as_of))
+    return "\n".join(lines)
+
+
 def format_signal(
     candidate: Candidate,
     point: float,

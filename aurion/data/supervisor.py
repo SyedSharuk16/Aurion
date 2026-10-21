@@ -93,6 +93,7 @@ class IngestSupervisor:
             for sym in cfg.enabled_instruments
         }
         self.stats = IngestStats()
+        self._backfilling: set[str] = set()
         self._stop = asyncio.Event()
 
     @property
@@ -343,6 +344,10 @@ class IngestSupervisor:
             )
             await self._backfill_sliced(instrument, start, now)
 
+    def is_backfilling(self, instrument: str) -> bool:
+        """Whether a backfill is in flight. Health checks ask before judging a feed."""
+        return instrument in self._backfilling
+
     async def _backfill_sliced(self, instrument: str, start: datetime, end: datetime) -> int:
         """Backfill in slices, persisting each before fetching the next.
 
@@ -353,10 +358,16 @@ class IngestSupervisor:
         """
         total = 0
         cursor = start
-        while cursor < end:
-            slice_end = min(cursor + timedelta(days=COLD_START_SLICE_DAYS), end)
-            total += await self.backfill(instrument, cursor, slice_end)
-            cursor = slice_end
+        self._backfilling.add(instrument)
+        try:
+            while cursor < end:
+                slice_end = min(cursor + timedelta(days=COLD_START_SLICE_DAYS), end)
+                total += await self.backfill(instrument, cursor, slice_end)
+                cursor = slice_end
+        finally:
+            # In a finally so a failed backfill does not leave the instrument permanently
+            # exempt from staleness checks, which would hide a genuinely dead feed.
+            self._backfilling.discard(instrument)
         return total
 
     # -- health ------------------------------------------------------------
@@ -365,9 +376,18 @@ class IngestSupervisor:
         return None if last is None else (now - last).total_seconds()
 
     async def check_staleness(self, now: datetime) -> list[FeedStale]:
+        """Instruments whose newest bar is older than the limit, excluding ones backfilling.
+
+        `last_candle_at` is the close time of the newest bar ingested, so during a cold
+        start it sits ~180 days in the past and every check reports the feed as stale by
+        that whole margin. The first run of this alerted at 15,367,137 seconds against a
+        120-second limit, which is the backfill working exactly as intended.
+        """
         out: list[FeedStale] = []
         limit = self._cfg.health.max_bar_staleness_s
         for instrument in self.instruments:
+            if instrument in self._backfilling:
+                continue
             age = self.staleness(instrument, now)
             last = self.stats.last_candle_at.get(instrument)
             if age is not None and last is not None and age > limit:

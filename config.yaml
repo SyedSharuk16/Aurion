@@ -310,6 +310,11 @@ model:
 # Notification
 # ---------------------------------------------------------------------------
 notify:
+  # compact = instrument, side, entry, SL, targets with their R, probability, time.
+  # full    = the above plus the Brier score, the top-3 log-odds attribution, the
+  #           session label and the invalidation condition. [prior] -- presentation
+  #           only: both carry the same decision and the same [PAPER] tag.
+  verbosity: compact
   send_charts: true
   chart_timeout_s: 10              # [prior] text is sent without the chart on timeout
   chart_timeframes: [entry, entry_up1]

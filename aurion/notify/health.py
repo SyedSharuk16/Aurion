@@ -88,7 +88,14 @@ class DailyCounters:
 class HealthMonitor:
     """Decides when to alert, and suppresses repeats without hiding a standing problem."""
 
-    __slots__ = ("_last_sent", "_max_staleness", "_realert", "_states_since", "counters")
+    __slots__ = (
+        "_last_sent",
+        "_max_staleness",
+        "_realert",
+        "_seen_connected",
+        "_states_since",
+        "counters",
+    )
 
     def __init__(
         self,
@@ -97,6 +104,7 @@ class HealthMonitor:
     ) -> None:
         self._max_staleness = max_bar_staleness_s
         self._realert = timedelta(minutes=calendar_realert_minutes)
+        self._seen_connected: dict[str, bool] = {}
         self._last_sent: dict[str, datetime] = {}
         self._states_since: dict[str, datetime] = {}
         self.counters = DailyCounters()
@@ -168,7 +176,13 @@ class HealthMonitor:
 
     def adapter_state(self, adapter: str, connected: bool, at: datetime, detail: str = "") -> Alert:
         kind = AlertKind.ADAPTER_RECONNECT if connected else AlertKind.ADAPTER_DISCONNECT
-        verb = "reconnected" if connected else "disconnected"
+        if connected:
+            # "reconnected" on the very first connection is a small lie that reads as a
+            # fault on a healthy start. The first one is a connection.
+            verb = "reconnected" if self._seen_connected.get(adapter) else "connected"
+            self._seen_connected[adapter] = True
+        else:
+            verb = "disconnected"
         return Alert(
             kind,
             at,
