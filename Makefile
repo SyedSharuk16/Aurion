@@ -1,7 +1,12 @@
 .PHONY: install test lint types cov causality power run preflight whoami setup all clean
 
+# Into a virtual environment: Debian and Ubuntu mark the system Python as externally
+# managed (PEP 668) and refuse a bare `pip install`, which is every current VPS image.
 install:
-	python3 -m pip install -e ".[dev]"
+	python3 -m venv .venv
+	.venv/bin/python -m pip install -e ".[dev]"
+	@echo
+	@echo "Activate it:  . .venv/bin/activate"
 
 test:
 	python3 -m pytest tests -q

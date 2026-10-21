@@ -130,16 +130,26 @@ image. Copy `.env.example` to `.env` and fill it, then check it:
 ```bash
 git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git
 cd Aurion
-python3 -m pip install -e ".[dev]"      # `python` and `\` on Windows cmd
-cp .env.example .env                    # `copy .env.example .env` on Windows cmd
-python3 scripts/setup.py                # verifies the chain, sends you one real message
+python3 -m venv .venv                   # required: see below
+. .venv/bin/activate                    # Windows cmd: .venv\Scripts\activate
+pip install -e ".[dev]"
+cp .env.example .env                    # Windows cmd: copy .env.example .env
+python scripts/setup.py                 # verifies the chain, sends you one real message
 ```
+
+**The virtual environment is not optional on Linux.** Debian and Ubuntu mark the system
+Python as externally managed (PEP 668), so a bare `pip install` is refused with
+`error: externally-managed-environment` — on essentially every current VPS image. Use the
+venv; do not pass `--break-system-packages`, which is what the error message tempts you
+into and which lets pip overwrite packages `apt` owns. `make install` creates it for you.
 
 Python **3.11+** is required (`StrEnum` and `datetime.UTC`); `setup.py` checks the version
 first so an older interpreter reports that rather than failing on an unrelated import.
-The interpreter is `python3` on Linux, WSL and macOS and `python` on Windows, and WSL has
-its own installation separate from any Windows one — installing in `cmd` does not install
-for WSL.
+Inside an activated venv the interpreter is `python` on every platform. WSL has its own
+installation separate from any Windows one — installing in `cmd` does not install for WSL.
+Very new interpreters (3.14+) may have no prebuilt wheels for `numpy`, `pydantic` or
+`SQLAlchemy`, in which case pip compiles them from source and may fail; a 3.12 or 3.13 venv
+is the quicker fix.
 
 `scripts/setup.py` is Python rather than a shell script so that one tested implementation
 runs from `cmd` on Windows, PowerShell, bash and a Linux VPS alike — a script per shell

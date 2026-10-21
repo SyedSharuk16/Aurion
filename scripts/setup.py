@@ -144,10 +144,20 @@ def main() -> int:
         from aurion.config.models import load_config
         from aurion.runtime.app import preflight
     except ModuleNotFoundError as exc:
-        die(
-            f"the dependency {exc.name!r} is not installed. Run:\n"
+        in_venv = sys.prefix != sys.base_prefix
+        hint = (
             '         pip install -e ".[dev]"'
+            if in_venv
+            else (
+                "         python3 -m venv .venv\n"
+                "         . .venv/bin/activate          # Windows: .venv\\Scripts\\activate\n"
+                '         pip install -e ".[dev]"\n'
+                "       A virtual environment because Debian and Ubuntu mark the system\n"
+                "       Python as externally managed (PEP 668), so a bare pip install is\n"
+                "       refused. Do not pass --break-system-packages."
+            )
         )
+        die(f"the dependency {exc.name!r} is not installed. Run:\n{hint}")
     findings = preflight(os.environ, load_config("config.yaml").meta.mode)
     for finding in findings:
         (die if finding.fatal else warn)(finding.render())
