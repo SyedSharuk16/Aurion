@@ -22,7 +22,7 @@ from aurion.analysis.ict.order_block import OrderBlock, find_order_blocks
 from aurion.analysis.ict.pd_range import DealingRange, dealing_range
 from aurion.analysis.ict.pools import LiquidityPool, find_equal_pools, mark_swept
 from aurion.analysis.ict.sweeps import Sweep, find_sweeps
-from aurion.analysis.primitives import atr
+from aurion.analysis.primitives import atr_series
 from aurion.analysis.sr.levels import SRLevel, kde_levels, merge_levels, weight_swings
 from aurion.analysis.structure.breaks import StructuralBreak, find_breaks, last_break
 from aurion.analysis.structure.swings import Swing, find_swings
@@ -114,13 +114,17 @@ _KINDS = (
 class ObjectStore:
     """Computes, caches and serves derived objects."""
 
-    __slots__ = ("_cache", "_hits", "_misses", "_params")
+    __slots__ = ("_cache", "_hits", "_levels", "_misses", "_params")
 
     def __init__(self, params: AnalysisParams) -> None:
         self._params = params
         self._cache: dict[
             tuple[str, TimeFrame, datetime, tuple[object, ...]], AnalysisSnapshot
         ] = {}
+        # The KDE fit is the only expensive step and `docs/01-architecture.md` §8 says to
+        # recompute it on D1 close rather than per bar. Levels are therefore cached
+        # separately from the snapshot and reused until a refresh is requested.
+        self._levels: dict[tuple[str, TimeFrame], tuple[datetime, list[SRLevel]]] = {}
         self._hits = 0
         self._misses = 0
 
@@ -135,6 +139,7 @@ class ObjectStore:
         timeframe: TimeFrame,
         window: int = 500,
         with_levels: bool = False,
+        refresh_levels: bool = False,
     ) -> AnalysisSnapshot:
         bars = list(view.usable_bars(instrument, timeframe, window))
         if not bars:
@@ -142,12 +147,19 @@ class ObjectStore:
 
         key = (instrument, timeframe, bars[-1].close_time, self._params.signature())
         cached = self._cache.get(key)
-        if cached is not None and (with_levels is False or cached.levels):
+        # Serve the cached snapshot unless the caller wants levels this one does not carry.
+        # `refresh_levels` is deliberately not part of this test: a refresh is requested on a
+        # D1 close, which is a new `close_time` and so a new key, and reaches `_compute`
+        # anyway. Including it here would let a `refresh_levels=False` caller be served a
+        # level-less snapshot cached by an earlier `with_levels=False` call.
+        if cached is not None and not (with_levels and not cached.levels):
             self._hits += 1
             return cached
         self._misses += 1
 
-        snapshot = self._compute(view.as_of, bars, instrument, timeframe, with_levels)
+        snapshot = self._compute(
+            view.as_of, bars, instrument, timeframe, with_levels, refresh_levels
+        )
         self._cache[key] = snapshot
         if len(self._cache) > 512:
             # Bounded: the hot set is one key per instrument/timeframe per bar close.
@@ -162,14 +174,17 @@ class ObjectStore:
         instrument: str,
         timeframe: TimeFrame,
         with_levels: bool,
+        refresh_levels: bool = False,
     ) -> AnalysisSnapshot:
         p = self._params
-        atr_value = atr(bars, p.atr_period)
+        # One true-range pass shared by every detector that needs ATR.
+        atrs = atr_series(bars, p.atr_period)
+        atr_value = atrs[-1] if atrs else None
 
         swings = find_swings(bars, p.swing_half_width)
         structure = trend_state(swings, as_of)
-        breaks = find_breaks(bars, swings, p.displacement_k, p.point, p.atr_period)
-        fvgs = find_fvgs(bars, p.fvg_min_atr, p.point, p.atr_period)
+        breaks = find_breaks(bars, swings, p.displacement_k, p.point, p.atr_period, atrs)
+        fvgs = find_fvgs(bars, p.fvg_min_atr, p.point, p.atr_period, atrs=atrs)
         blocks = find_order_blocks(
             bars, breaks, p.ob_lookback_bars, p.point, p.ob_extent, p.breaker_window_bars
         )
@@ -188,6 +203,7 @@ class ObjectStore:
                 p.sweep_reclaim_buffer_atr,
                 p.sweep_max_bars,
                 p.atr_period,
+                atrs,
             )
             swept = {(s.pool_level, s.side): s for s in sweeps}
             pools = [
@@ -203,18 +219,27 @@ class ObjectStore:
 
         levels: list[SRLevel] = []
         if with_levels and atr_value is not None and swings:
-            weights = weight_swings(
-                swings,
-                bars,
-                p.sr_halflife_bars,
-                p.sr_touch_tolerance_atr,
-                atr_value,
-                p.sr_touch_min_separation,
-            )
-            levels = merge_levels(
-                kde_levels(weights, p.sr_bandwidth_atr * atr_value, as_of),
-                p.sr_merge_distance_atr * atr_value,
-            )
+            cached_levels = self._levels.get((instrument, timeframe))
+            # The stored timestamp is a causality guard, not a diagnostic. This cache is keyed
+            # only by instrument/timeframe, so without it a replay of an earlier prefix on the
+            # same store would be served levels fitted at a later `as_of` -- look-ahead
+            # arriving through the cache instead of through the data.
+            if cached_levels is not None and cached_levels[0] <= as_of and not refresh_levels:
+                levels = cached_levels[1]
+            else:
+                weights = weight_swings(
+                    swings,
+                    bars,
+                    p.sr_halflife_bars,
+                    p.sr_touch_tolerance_atr,
+                    atr_value,
+                    p.sr_touch_min_separation,
+                )
+                levels = merge_levels(
+                    kde_levels(weights, p.sr_bandwidth_atr * atr_value, as_of),
+                    p.sr_merge_distance_atr * atr_value,
+                )
+                self._levels[(instrument, timeframe)] = (as_of, levels)
 
         return AnalysisSnapshot(
             instrument=instrument,

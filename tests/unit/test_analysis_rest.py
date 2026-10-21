@@ -493,6 +493,35 @@ def test_snapshot_is_memoised_on_the_last_closed_bar():
     assert misses_after == misses_before and hits_after == hits_before + 1
 
 
+def test_a_levelless_cached_snapshot_does_not_deny_a_later_caller_its_levels():
+    repo, t0 = _world()
+    view = MarketView(repo, t0 + timedelta(minutes=15 * 400))
+    store = ObjectStore(AnalysisParams(point=0.01))
+
+    assert not store.snapshot(view, "XAUUSD", TimeFrame.M15).levels
+    # Same bar close, so the same cache key -- but this caller asked for levels, and the
+    # cached snapshot has none. Serving it would silently hand the engine zero S/R.
+    assert store.snapshot(view, "XAUUSD", TimeFrame.M15, with_levels=True).levels
+
+
+def test_the_level_cache_is_never_served_backwards_in_time():
+    repo, t0 = _world()
+    store = ObjectStore(AnalysisParams(point=0.01))
+    late = MarketView(repo, t0 + timedelta(minutes=15 * 400))
+    early = MarketView(repo, t0 + timedelta(minutes=15 * 200))
+
+    assert store.snapshot(late, "XAUUSD", TimeFrame.M15, with_levels=True).levels
+    early_levels = store.snapshot(early, "XAUUSD", TimeFrame.M15, with_levels=True).levels
+
+    # The level cache is keyed only by instrument/timeframe, so a replay of an earlier
+    # prefix on the same store must refit rather than inherit the later fit. Otherwise
+    # look-ahead arrives through the cache instead of through the data, and the prefix
+    # invariance test would be measuring a cache rather than the detectors.
+    assert early_levels
+    for level in early_levels:
+        assert level.computed_at <= early.as_of
+
+
 def test_objects_accessor_filters_on_confirmation():
     repo, t0 = _world()
     store = ObjectStore(AnalysisParams(point=0.01))

@@ -28,7 +28,11 @@ data/archive/
 data/cache/
 logs/
 artifacts/
-reports/out/
+# Generated run output. Validation reports and charts carry performance numbers from a
+# specific data snapshot and config; committing them would leave numbers in the tree with
+# nothing tying them to the run that produced them. `ValidationReport.write` creates the
+# directory itself.
+reports/
 
 # Vendor market data must not be redistributed (see docs/06-open-questions.md Q11)
 tests/fixtures/real/

@@ -57,13 +57,14 @@ def find_sweeps(
     reclaim_buffer_atr: float,
     max_bars: int,
     atr_period: int = 14,
+    atrs: Sequence[float | None] | None = None,
 ) -> list[Sweep]:
     """Completed sweeps of each pool, oldest first.
 
     Only bars that closed at or after a pool's confirmation are eligible: a pool cannot be
     swept before it exists.
     """
-    atrs = atr_series(bars, atr_period)
+    atrs = atr_series(bars, atr_period) if atrs is None else atrs
     out: list[Sweep] = []
 
     for pool in pools:

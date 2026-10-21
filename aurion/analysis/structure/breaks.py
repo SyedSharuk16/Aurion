@@ -60,14 +60,19 @@ class Displacement:
 
 
 def find_displacements(
-    bars: Sequence[Bar], k: float, atr_period: int = 14
+    bars: Sequence[Bar],
+    k: float,
+    atr_period: int = 14,
+    atrs: Sequence[float | None] | None = None,
 ) -> dict[int, Displacement]:
     """Displacement bars keyed by index into ``bars``.
 
     The ATR used is the value at the displacement bar itself and is frozen there -- the
     object must not change as ATR evolves, or it would repaint.
     """
-    atrs = atr_series(bars, atr_period)
+    # Shared across detectors when the caller already has it: recomputing the true-range
+    # series in each of find_displacements / find_fvgs / find_sweeps was 10% of runtime.
+    atrs = atr_series(bars, atr_period) if atrs is None else atrs
     out: dict[int, Displacement] = {}
     for i in range(1, len(bars) - 1):
         atr_i = atrs[i]
@@ -122,6 +127,7 @@ def find_breaks(
     k: float,
     point: float,
     atr_period: int = 14,
+    atrs: Sequence[float | None] | None = None,
 ) -> list[StructuralBreak]:
     """BOS and CHoCH events, oldest first.
 
@@ -129,7 +135,7 @@ def find_breaks(
     plus displacement on the same bar. Using the confirmed swing, not the latest extreme,
     is what prevents a break being declared against a level that was not yet knowable.
     """
-    displacements = find_displacements(bars, k, atr_period)
+    displacements = find_displacements(bars, k, atr_period, atrs)
     tol = BREAK_TOLERANCE_POINTS * point
     out: list[StructuralBreak] = []
     last_structural: datetime | None = None
