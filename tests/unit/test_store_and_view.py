@@ -30,34 +30,39 @@ def m1_range(indices):
 
 async def test_m1_upsert_is_idempotent(store):
     candles = m1_range(range(10))
-    assert await store.upsert_m1(candles, 1e-5) == 10
-    assert await store.upsert_m1(candles, 1e-5) == 0, "backfill overlaps by design"
+    assert await store.upsert_m1(candles) == 10
+    assert await store.upsert_m1(candles) == 0, "backfill overlaps by design"
     assert len(await store.load_m1("EURUSD")) == 10
 
 
 async def test_loaded_timestamps_are_timezone_aware(store):
-    await store.upsert_m1(m1_range(range(3)), 1e-5)
+    await store.upsert_m1(m1_range(range(3)))
     loaded = await store.load_m1("EURUSD")
     assert all(c.open_time.tzinfo is not None for c in loaded)
     assert loaded[0].open_time == T0
 
 
-async def test_prices_are_rounded_to_the_point_so_replay_is_bit_identical(store):
+async def test_store_persists_verbatim_so_recomputed_bars_match_stored_ones(store):
+    """Rounding on write made a recomputed bar differ from its stored twin.
+
+    That broke the determinism check in rehydrate, which is how the bug was found.
+    Normalisation now happens once at the adapter boundary; the store is verbatim.
+    """
     candle = make_m1("XAUUSD", T0, 2318.40491, high_off=0.8, low_off=0.6, close_off=0.2,
                      spread=0.2)
-    await store.upsert_m1([candle], 0.01)
+    await store.upsert_m1([candle])
     loaded = (await store.load_m1("XAUUSD"))[0]
-    assert loaded.bid.o == pytest.approx(round(candle.bid.o, 2))
+    assert loaded.bid == candle.bid and loaded.ask == candle.ask
 
 
 async def test_gap_detection(store):
-    await store.upsert_m1(m1_range(list(range(5)) + list(range(8, 15))), 1e-5)
+    await store.upsert_m1(m1_range(list(range(5)) + list(range(8, 15))))
     gaps = await store.m1_gaps("EURUSD", T0, T0 + timedelta(minutes=20))
     assert gaps == [(T0 + timedelta(minutes=5), T0 + timedelta(minutes=8))]
 
 
 async def test_retention_pruning(store):
-    await store.upsert_m1(m1_range(range(20)), 1e-5)
+    await store.upsert_m1(m1_range(range(20)))
     pruned = await store.prune_m1("EURUSD", T0 + timedelta(minutes=10))
     assert pruned == 10
     assert len(await store.load_m1("EURUSD")) == 10
@@ -75,7 +80,7 @@ async def test_cursor_roundtrip(store):
 async def test_bar_roundtrip_preserves_flags(store):
     bar = Bar("EURUSD", TimeFrame.H4, T0, T0 + timedelta(hours=4),
               OHLC(1.1, 1.2, 1.0, 1.15), 500, 180, incomplete=True, dst_irregular=True)
-    await store.upsert_bars([bar], 1e-5)
+    await store.upsert_bars([bar])
     loaded = (await store.load_bars("EURUSD", TimeFrame.H4))[0]
     assert loaded.incomplete and loaded.dst_irregular
     assert loaded.timeframe is TimeFrame.H4
@@ -83,7 +88,7 @@ async def test_bar_roundtrip_preserves_flags(store):
 
 
 async def test_last_m1_open(store):
-    await store.upsert_m1(m1_range(range(7)), 1e-5)
+    await store.upsert_m1(m1_range(range(7)))
     assert await store.last_m1_open("EURUSD") == T0 + timedelta(minutes=6)
     assert await store.last_m1_open("GBPUSD") is None
 

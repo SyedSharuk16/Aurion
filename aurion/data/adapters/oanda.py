@@ -72,13 +72,21 @@ def _parse_time(raw: str) -> datetime:
     return out if out.tzinfo else out.replace(tzinfo=UTC)
 
 
-def _ohlc(block: dict[str, Any], where: str) -> OHLC:
+def _ohlc(block: dict[str, Any], where: str, point: float | None = None) -> OHLC:
+    """Parse a bid or ask block, normalising to the instrument's point grid.
+
+    Vendor quotes are already on the grid, so this removes float representation noise
+    rather than changing prices. It happens here, at the single entry point for raw prices,
+    so that the in-memory value and the persisted value are identical -- the property the
+    determinism check in `IngestSupervisor.rehydrate` relies on.
+    """
     try:
-        return OHLC(
-            o=float(block["o"]), h=float(block["h"]), l=float(block["l"]), c=float(block["c"])
-        )
+        values = [float(block[k]) for k in ("o", "h", "l", "c")]
     except (KeyError, TypeError, ValueError) as exc:
         raise AdapterError("oanda", "parse_candle", f"malformed {where} block: {block!r}") from exc
+    if point is not None and point > 0:
+        values = [round(v / point) * point for v in values]
+    return OHLC(o=values[0], h=values[1], l=values[2], c=values[3])
 
 
 class OandaAdapter:
@@ -93,6 +101,7 @@ class OandaAdapter:
         environment: Literal["practice", "live"] = "practice",
         client: httpx.AsyncClient | None = None,
         stream_idle_timeout_s: float = 15.0,
+        points: dict[str, float] | None = None,
     ) -> None:
         if environment not in _HOSTS:
             raise AdapterError("oanda", "init", f"unknown environment {environment!r}")
@@ -100,6 +109,7 @@ class OandaAdapter:
         self._account_id = account_id
         self._token = api_token
         self._idle_timeout = stream_idle_timeout_s
+        self._points = points or {}
         self._last_message_at: datetime | None = None
         self._connected = False
         self._client = client or httpx.AsyncClient(
@@ -179,6 +189,7 @@ class OandaAdapter:
         return out
 
     def _parse_candles(self, instrument: str, payload: dict[str, Any]) -> list[M1Candle]:
+        point = self._points.get(instrument)
         raw = payload.get("candles")
         if raw is None:
             raise AdapterError("oanda", "parse", f"response has no 'candles': {list(payload)}")
@@ -198,8 +209,8 @@ class OandaAdapter:
                     instrument=instrument,
                     open_time=open_time,
                     close_time=open_time + timedelta(minutes=1),
-                    bid=_ohlc(item["bid"], "bid"),
-                    ask=_ohlc(item["ask"], "ask"),
+                    bid=_ohlc(item["bid"], "bid", point),
+                    ask=_ohlc(item["ask"], "ask", point),
                     tick_volume=int(item.get("volume", 0)),
                 )
             )

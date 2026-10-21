@@ -8,8 +8,12 @@ Design points worth stating, because each prevents a specific failure:
   the repaint the design forbids; the adapter drops them on ingest.
 * **``confirmed_at`` is a column on every derived table**, and every read filters on it.
   There is no index path that returns an unconfirmed object.
-* **Prices are rounded to the instrument's point before persistence** (§0.7) so replay is
-  bit-identical.
+* **Prices are normalised to the instrument's point at the ADAPTER boundary, not here.**
+  The store persists verbatim. Rounding only on write made a recomputed bar differ from
+  its stored twin, which broke the determinism check in `IngestSupervisor.rehydrate` --
+  the bug that found this. Derived mid is never rounded: a mid can legitimately sit on a
+  half point when the spread is an odd number of points, and rounding it would introduce a
+  systematic bias instead of removing noise.
 * Analysis does not read from here. The live runtime keeps a bounded in-memory hot window
   (`InMemoryBarRepository`) that this store rehydrates on restart; making the repository
   async would push ``await`` through every analysis function to no benefit.
@@ -175,10 +179,6 @@ class RunRow(Base):
     selection_branch: Mapped[str] = mapped_column(String(32), default="pending_pilot")
 
 
-def _round(value: float, point: float) -> float:
-    return round(value / point) * point
-
-
 class Store:
     """Async persistence facade."""
 
@@ -200,7 +200,7 @@ class Store:
         return self._session()
 
     # -- M1 ----------------------------------------------------------------
-    async def upsert_m1(self, candles: Iterable[M1Candle], point: float) -> int:
+    async def upsert_m1(self, candles: Iterable[M1Candle]) -> int:
         """Insert M1 candles, skipping any already present. Idempotent by design.
 
         Backfill overlaps by one bar at every seam, so duplicates are expected rather than
@@ -217,14 +217,14 @@ class Store:
                         instrument=c.instrument,
                         open_time=c.open_time,
                         close_time=c.close_time,
-                        bid_o=_round(c.bid.o, point),
-                        bid_h=_round(c.bid.h, point),
-                        bid_l=_round(c.bid.l, point),
-                        bid_c=_round(c.bid.c, point),
-                        ask_o=_round(c.ask.o, point),
-                        ask_h=_round(c.ask.h, point),
-                        ask_l=_round(c.ask.l, point),
-                        ask_c=_round(c.ask.c, point),
+                        bid_o=c.bid.o,
+                        bid_h=c.bid.h,
+                        bid_l=c.bid.l,
+                        bid_c=c.bid.c,
+                        ask_o=c.ask.o,
+                        ask_h=c.ask.h,
+                        ask_l=c.ask.l,
+                        ask_c=c.ask.c,
                         tick_volume=c.tick_volume,
                         source_adapter=self._adapter_name,
                     )
@@ -266,6 +266,17 @@ class Store:
             got = result.scalar_one_or_none()
             return got.replace(tzinfo=UTC) if got is not None else None
 
+    async def first_m1_open(self, instrument: str) -> datetime | None:
+        async with self._session() as s:
+            result = await s.execute(
+                select(M1Row.open_time)
+                .where(M1Row.instrument == instrument)
+                .order_by(M1Row.open_time)
+                .limit(1)
+            )
+            got = result.scalar_one_or_none()
+            return got.replace(tzinfo=UTC) if got is not None else None
+
     async def m1_gaps(
         self, instrument: str, start: datetime, end: datetime
     ) -> list[tuple[datetime, datetime]]:
@@ -295,12 +306,30 @@ class Store:
             return int(getattr(result, "rowcount", 0) or 0)
 
     # -- resampled ---------------------------------------------------------
-    async def upsert_bars(self, bars: Iterable[Bar], point: float) -> int:
+    async def upsert_bars(self, bars: Iterable[Bar], replace: bool = False) -> int:
+        """Insert resampled bars.
+
+        ``replace=True`` overwrites an existing row, which the rebuild path after a gap
+        repair needs: insert-only semantics let a stale thin bar win over its recomputed
+        twin, which is how this was found.
+        """
         rows = 0
         async with self._session() as s, s.begin():
             for b in bars:
                 key = (b.instrument, str(b.timeframe), b.open_time)
-                if await s.get(BarRow, key) is not None:
+                existing = await s.get(BarRow, key)
+                if existing is not None:
+                    if not replace:
+                        continue
+                    existing.close_time = b.close_time
+                    existing.o, existing.h, existing.l, existing.c = (
+                        b.ohlc.o, b.ohlc.h, b.ohlc.l, b.ohlc.c,
+                    )
+                    existing.tick_volume = b.tick_volume
+                    existing.constituents = b.constituents
+                    existing.incomplete = b.incomplete
+                    existing.dst_irregular = b.dst_irregular
+                    rows += 1
                     continue
                 s.add(
                     BarRow(
@@ -308,10 +337,10 @@ class Store:
                         timeframe=str(b.timeframe),
                         open_time=b.open_time,
                         close_time=b.close_time,
-                        o=_round(b.ohlc.o, point),
-                        h=_round(b.ohlc.h, point),
-                        l=_round(b.ohlc.l, point),
-                        c=_round(b.ohlc.c, point),
+                        o=b.ohlc.o,
+                        h=b.ohlc.h,
+                        l=b.ohlc.l,
+                        c=b.ohlc.c,
                         tick_volume=b.tick_volume,
                         constituents=b.constituents,
                         incomplete=b.incomplete,
@@ -349,6 +378,25 @@ class Store:
             )
             for r in rows
         ]
+
+    async def delete_bars_from(
+        self, instrument: str, from_time: datetime, timeframe: TimeFrame | None = None
+    ) -> int:
+        """Drop cached resampled bars at or after ``from_time``.
+
+        A repaired M1 gap invalidates every resampled bar that covered it -- those bars
+        were aggregated from an incomplete set and may be flagged thin. Patching the M1
+        series without dropping them would leave permanently wrong higher-timeframe bars,
+        so repair deletes and recomputes rather than appends.
+        """
+        stmt = delete(BarRow).where(
+            BarRow.instrument == instrument, BarRow.open_time >= from_time
+        )
+        if timeframe is not None:
+            stmt = stmt.where(BarRow.timeframe == str(timeframe))
+        async with self._session() as s, s.begin():
+            result = await s.execute(stmt)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     # -- cursors -----------------------------------------------------------
     async def set_cursor(

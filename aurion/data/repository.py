@@ -100,6 +100,17 @@ class InMemoryBarRepository:
         series.append(quote)
         self._trim(series, self._max_quotes)  # type: ignore[arg-type]
 
+    def clear(self, instrument: str) -> None:
+        """Drop one instrument's hot window so it can be rebuilt from the store.
+
+        Needed because the series are append-only: a repaired historical gap cannot be
+        inserted, only replayed.
+        """
+        for key in [k for k in self._bars if k[0] == instrument]:
+            del self._bars[key]
+        self._m1.pop(instrument, None)
+        self._quotes.pop(instrument, None)
+
     # -- reads -------------------------------------------------------------
     def bars(
         self, instrument: str, timeframe: TimeFrame, n: int, as_of: datetime

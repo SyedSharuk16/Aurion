@@ -50,9 +50,11 @@ class DataAdapter(Protocol):
         """Complete bars only. Incomplete candles are dropped, never stored and corrected."""
         ...
 
-    async def stream_prices(
+    def stream_prices(
         self, instruments: Sequence[str]
-    ) -> AsyncIterator[Quote | Heartbeat]: ...
+    ) -> AsyncIterator[Quote | Heartbeat]:
+        """Async generator, so calling this returns an iterator rather than a coroutine."""
+        ...
 
     async def latest_quote(self, instrument: str) -> Quote: ...
 
