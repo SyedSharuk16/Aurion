@@ -40,7 +40,7 @@ run:
 
 # Verify the whole chain and send one real Telegram message. Run this first.
 setup:
-	bash scripts/setup.sh
+	python3 scripts/setup.py
 
 # Discover the OANDA account ID and environment from the token. Reads /v3/accounts only.
 whoami:

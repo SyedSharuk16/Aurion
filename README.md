@@ -50,7 +50,7 @@ the tag is removed. The tag is applied by the formatter, not by an operator's di
 | `docs/07-power-and-capacity.md` | Derived trial budget, minimum detectable effects, the module cut, the pilot spec, and two corrections to Phase 1 |
 | `tools/power.py` | Runnable calculator behind every number in `docs/07` |
 | `tools/oanda_whoami.py` | Prints the OANDA account ID and environment for a token |
-| `scripts/setup.sh` | First-run verification: `make setup`. Sends one real message |
+| `scripts/setup.py` | First-run verification. Sends one real message. Any shell, any OS |
 | `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
 
 ---
@@ -130,17 +130,20 @@ image. Copy `.env.example` to `.env` and fill it, then check it:
 ```bash
 git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git
 cd Aurion
-cp .env.example .env     # then edit: OANDA token, Telegram bot token, your chat ID
-bash scripts/setup.sh    # verifies the whole chain and sends you one real message
-docker compose -f deploy/docker-compose.yml up -d
+pip install -e ".[dev]"
+copy .env.example .env         # Windows cmd;  cp .env.example .env  on bash/macOS
+python scripts/setup.py        # verifies the chain and sends you one real message
 ```
 
-**On Windows**, run those in **Git Bash** (bundled with Git for Windows: right-click the
-folder, "Git Bash Here"), not `cmd` or PowerShell. `scripts/setup.sh` detects `python` vs
-`python3` so it works either way; `make` is not required. Windows is fine for a first test,
-but a desktop that sleeps is not an always-on host — the stream drops and the gap is
-backfilled on reconnect, so you lose evaluations rather than data. A small Linux VPS is what
-`deploy/` targets.
+`scripts/setup.py` is Python rather than a shell script so that one tested implementation
+runs from `cmd` on Windows, PowerShell, bash and a Linux VPS alike — a script per shell
+drifts from whichever one actually gets exercised. It uses only the standard library and
+puts the repo on `sys.path` itself, so it runs from a bare checkout before `pip install`
+and can tell you *that* is what is missing.
+
+Windows is fine for a first test, but a desktop that sleeps is not an always-on host: the
+stream drops, and although the gap is backfilled on reconnect you lose the evaluations that
+would have happened. A small Linux VPS is what `deploy/` targets.
 
 `make setup` checks each link in order and stops at the first break, because a later check
 passing tells you nothing if an earlier one failed: the env file, the OANDA account (which
