@@ -16,9 +16,14 @@ than hiding.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
+
+from aurion.core.timeframe import UTC
 
 Impact = Literal["low", "medium", "high"]
 
@@ -137,3 +142,78 @@ def blackout_for(
         if k in title and (best is None or len(k) > best[0]):
             best = (len(k), minutes)
     return timedelta(minutes=best[1] if best else default_minutes)
+
+def load_calendar_events(path: str | Path) -> list[CalendarEvent]:
+    """Read a calendar snapshot from JSON.
+
+    Each entry needs `event_id`, `scheduled_utc`, `currency`, `title`, `impact` and
+    `published_utc`; `revision` defaults to 0. Timestamps must be ISO 8601 and
+    timezone-aware, because a naive one here is a silent hour-or-more error in a gate whose
+    whole job is a +/-30 minute window.
+
+    `published_utc` is not decoration: it is what makes the snapshot point-in-time, so the
+    backtest sees an event as it was published rather than as it was later revised. A file
+    that sets it equal to `scheduled_utc` is asserting the event was known at its own
+    release instant, which is false for anything added or revised afterwards.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError(f"{path}: expected a JSON list of events, got {type(raw).__name__}")
+    out: list[CalendarEvent] = []
+    for i, item in enumerate(raw):
+        try:
+            scheduled = _require_aware(datetime.fromisoformat(item["scheduled_utc"]))
+            published = _require_aware(datetime.fromisoformat(item["published_utc"]))
+            impact = item["impact"]
+            if impact not in ("low", "medium", "high"):
+                raise ValueError(f"impact {impact!r} is not low|medium|high")
+            out.append(
+                CalendarEvent(
+                    event_id=str(item["event_id"]),
+                    scheduled_utc=scheduled,
+                    currency=str(item["currency"]),
+                    title=str(item["title"]),
+                    impact=impact,
+                    published_utc=published,
+                    revision=int(item.get("revision", 0)),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"{path}: event {i} is invalid: {exc}") from exc
+    return out
+
+
+def _require_aware(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        raise ValueError(f"{ts.isoformat()} has no timezone")
+    return ts.astimezone(UTC)
+
+
+def calendar_from_env(env: Mapping[str, str]) -> CalendarProvider:
+    """The provider named by `AURION_CALENDAR_PROVIDER`, or the blocking Null provider.
+
+    `provider_env` was declared in `NewsCfg` and read by nothing: `build_app` always
+    constructed `NullCalendarProvider`, which reports itself unavailable, which under
+    `news.fail_safe = block` suppresses every signal. So the system could not emit at all,
+    and the only sign of it was one admin alert.
+
+    `file` is the supported provider. It is deliberately the only one: a snapshot on disk is
+    reproducible, has real `published_utc` stamps, works in a backtest unchanged, and cannot
+    quietly start returning different history for a past date the way a live API can.
+    """
+    name = env.get("AURION_CALENDAR_PROVIDER", "").strip().lower()
+    if name in ("", "none", "null"):
+        return NullCalendarProvider()
+    if name == "file":
+        path = env.get("AURION_CALENDAR_PATH", "").strip()
+        if not path:
+            raise ValueError(
+                "AURION_CALENDAR_PROVIDER=file needs AURION_CALENDAR_PATH. Without it the "
+                "news gate fails closed and every signal is suppressed."
+            )
+        return StaticCalendarProvider(load_calendar_events(path))
+    raise ValueError(
+        f"AURION_CALENDAR_PROVIDER={name!r} is not implemented. Supported: file, none. "
+        "A name that silently falls back to 'none' would suppress every signal."
+    )
+

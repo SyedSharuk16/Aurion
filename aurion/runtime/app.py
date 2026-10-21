@@ -46,7 +46,11 @@ from aurion.notify.telegram.charts import ChartAnnotation, render_signal_chart
 from aurion.notify.telegram.formatters import format_signal, format_transition
 from aurion.notify.telegram.outbox import Outbox, OutboxKind, OutboxMessage, dedupe_key
 from aurion.runtime.logging import configure, log_candidate
-from aurion.sessions.calendar import CalendarProvider, NullCalendarProvider
+from aurion.sessions.calendar import (
+    CalendarProvider,
+    NullCalendarProvider,
+    calendar_from_env,
+)
 from aurion.sessions.gates import AdmissibilityGate, build_spread_tracker, build_window_set
 from aurion.signals.context import (
     DEFAULT_ANALYSIS_WINDOW,
@@ -590,7 +594,16 @@ def build_app(config_path: str | Path | None = None) -> AurionApp:
 
     settings = TelegramSettings.from_env()
     transport = HttpTelegramTransport(settings.token) if settings.token else None
-    return AurionApp(cfg, adapter, store, transport=transport)
+    # Was always NullCalendarProvider, which reports itself unavailable, which under
+    # `news.fail_safe = block` suppresses every signal -- so the process could not emit at
+    # all, and said so in exactly one admin alert.
+    calendar = calendar_from_env(os.environ)
+    if isinstance(calendar, NullCalendarProvider) and cfg.news.fail_safe == "block":
+        _log.warning(
+            "no calendar provider configured and news.fail_safe=block: EVERY signal will be "
+            "suppressed. Set AURION_CALENDAR_PROVIDER=file and AURION_CALENDAR_PATH."
+        )
+    return AurionApp(cfg, adapter, store, transport=transport, calendar=calendar)
 
 
 async def main() -> None:  # pragma: no cover - process entry point

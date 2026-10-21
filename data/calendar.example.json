@@ -1,0 +1,20 @@
+[
+  {
+    "event_id": "REPLACE-ME-nfp-2026-01",
+    "scheduled_utc": "2026-01-02T13:30:00+00:00",
+    "currency": "USD",
+    "title": "EXAMPLE ROW -- NOT A REAL SCHEDULE. Non-Farm Payrolls",
+    "impact": "high",
+    "published_utc": "2025-12-01T00:00:00+00:00",
+    "revision": 0
+  },
+  {
+    "event_id": "REPLACE-ME-fomc-2026-01",
+    "scheduled_utc": "2026-01-28T19:00:00+00:00",
+    "currency": "USD",
+    "title": "EXAMPLE ROW -- NOT A REAL SCHEDULE. FOMC Rate Decision",
+    "impact": "high",
+    "published_utc": "2025-12-01T00:00:00+00:00",
+    "revision": 0
+  }
+]

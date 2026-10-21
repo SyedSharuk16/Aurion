@@ -26,6 +26,8 @@ htmlcov/
 *.db-shm
 data/archive/
 data/cache/
+# The real calendar snapshot is operator data; the template is committed.
+data/calendar.json
 logs/
 artifacts/
 # Generated run output. Validation reports and charts carry performance numbers from a

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -13,7 +14,9 @@ from aurion.sessions.calendar import (
     NullCalendarProvider,
     StaticCalendarProvider,
     blackout_for,
+    calendar_from_env,
     currencies_of,
+    load_calendar_events,
 )
 from aurion.sessions.spread import SpreadTracker
 
@@ -130,3 +133,75 @@ def test_blackout_longest_title_match_wins():
 def test_metal_instruments_also_watch_usd_events():
     assert currencies_of("XAUUSD", "XAU", "USD") == frozenset({"XAU", "USD"})
     assert currencies_of("EURUSD", "EUR", "USD") == frozenset({"EUR", "USD"})
+
+
+# -- calendar loading --------------------------------------------------------
+def _event_json(**over):
+    base = {
+        "event_id": "nfp-2024-06",
+        "scheduled_utc": "2024-06-07T12:30:00+00:00",
+        "currency": "USD",
+        "title": "Non-Farm Payrolls",
+        "impact": "high",
+        "published_utc": "2024-05-24T00:00:00+00:00",
+    }
+    return {**base, **over}
+
+
+def _write(tmp_path, events):
+    path = tmp_path / "calendar.json"
+    path.write_text(json.dumps(events), encoding="utf-8")
+    return path
+
+
+def test_a_calendar_file_loads_into_a_point_in_time_provider(tmp_path):
+    path = _write(tmp_path, [_event_json(), _event_json(event_id="cpi", impact="medium")])
+    provider = calendar_from_env(
+        {"AURION_CALENDAR_PROVIDER": "file", "AURION_CALENDAR_PATH": str(path)}
+    )
+    assert provider.available() and provider.supports_point_in_time
+    window = (datetime(2024, 6, 1, tzinfo=UTC), datetime(2024, 6, 30, tzinfo=UTC))
+    assert len(provider.events(*window)) == 2
+    # Published after the evaluation instant: invisible, which is the whole point.
+    assert provider.events(*window, as_published_before=datetime(2024, 5, 1, tzinfo=UTC)) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"impact": "catastrophic"},
+        {"scheduled_utc": "2024-06-07T12:30:00"},
+        {"published_utc": "not-a-date"},
+    ],
+)
+def test_a_malformed_event_names_the_row_rather_than_loading_partially(tmp_path, bad):
+    """A naive timestamp is a silent hour-or-more error in a +/-30 minute gate."""
+    path = _write(tmp_path, [_event_json(), _event_json(**bad)])
+    with pytest.raises(ValueError, match="event 1"):
+        load_calendar_events(path)
+
+
+def test_a_json_object_instead_of_a_list_is_refused(tmp_path):
+    path = tmp_path / "calendar.json"
+    path.write_text('{"events": []}', encoding="utf-8")
+    with pytest.raises(ValueError, match="expected a JSON list"):
+        load_calendar_events(path)
+
+
+def test_no_provider_configured_yields_the_blocking_provider():
+    """Which is correct, and is also why nothing could ever emit before this was wired."""
+    for env in ({}, {"AURION_CALENDAR_PROVIDER": ""}, {"AURION_CALENDAR_PROVIDER": "none"}):
+        provider = calendar_from_env(env)
+        assert isinstance(provider, NullCalendarProvider)
+        assert not provider.available()
+
+
+def test_file_without_a_path_is_an_error_not_a_silent_fallback():
+    """Falling back to 'none' here would suppress every signal with no stated reason."""
+    with pytest.raises(ValueError, match="AURION_CALENDAR_PATH"):
+        calendar_from_env({"AURION_CALENDAR_PROVIDER": "file"})
+
+
+def test_an_unimplemented_provider_name_is_refused():
+    with pytest.raises(ValueError, match="not implemented"):
+        calendar_from_env({"AURION_CALENDAR_PROVIDER": "tradingeconomics"})

@@ -62,7 +62,7 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **483 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
+Current state: **493 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
@@ -139,15 +139,26 @@ RuntimeError: refusing to start in mode 'paper' without AURION_OANDA_API_TOKEN,
 AURION_OANDA_ACCOUNT_ID, AURION_TELEGRAM_BOT_TOKEN, AURION_TELEGRAM_SIGNAL_CHAT_ID
 ```
 
-**2. A news calendar, or you will get exactly one message and nothing else.**
-`news.fail_safe: block` is fixed per the brief, and with no calendar provider configured the
-provider reports itself unavailable, which blocks **every** signal. The first thing a
-correctly-configured bot sends is therefore the admin alert saying so:
+**2. A news calendar.** `news.fail_safe: block` is fixed per the brief, so with no provider
+the gate fails closed and **every** signal is suppressed — correct behaviour (a system with
+no news feed should not quietly trade through NFP), announced once in the admin channel:
 
 > 📅 Economic calendar unavailable. Under fail_safe=block EVERY signal is suppressed.
 
-That is the designed behaviour — a system with no news feed should not quietly trade through
-NFP — but it means `AURION_CALENDAR_PROVIDER` is not optional if you want signals.
+So the calendar is not optional if you want signals. Point it at a snapshot on disk:
+
+```bash
+AURION_CALENDAR_PROVIDER=file
+AURION_CALENDAR_PATH=./data/calendar.json
+```
+
+`data/calendar.example.json` is a **template with invented dates**, marked as such in every
+title — it loads, and it blocks the wrong minutes. `data/README.md` has the schema. The
+field that matters is `published_utc`: it is what makes the snapshot point-in-time, and
+setting it equal to `scheduled_utc` is a look-ahead leak through the calendar in any
+backtest over past data. A run on a non-point-in-time calendar is marked as such in the
+validation report rather than silently accepted. A file rather than a live API on purpose: a
+snapshot is reproducible and cannot quietly return different history for a past date.
 
 **3. History.** A cold start backfills the warm-up window (`data.m1_retention_days`, 180
 days) in 7-day slices, which is ~259k M1 candles per instrument over ~26 paginated OANDA
