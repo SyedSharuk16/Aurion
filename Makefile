@@ -1,4 +1,4 @@
-.PHONY: install test lint types cov causality power run preflight whoami all clean
+.PHONY: install test lint types cov causality power run preflight whoami setup all clean
 
 install:
 	python3 -m pip install -e ".[dev]"
@@ -37,6 +37,10 @@ preflight:
 
 run:
 	python3 -m aurion.runtime.app
+
+# Verify the whole chain and send one real Telegram message. Run this first.
+setup:
+	bash scripts/setup.sh
 
 # Discover the OANDA account ID and environment from the token. Reads /v3/accounts only.
 whoami:

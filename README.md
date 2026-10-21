@@ -50,6 +50,7 @@ the tag is removed. The tag is applied by the formatter, not by an operator's di
 | `docs/07-power-and-capacity.md` | Derived trial budget, minimum detectable effects, the module cut, the pilot spec, and two corrections to Phase 1 |
 | `tools/power.py` | Runnable calculator behind every number in `docs/07` |
 | `tools/oanda_whoami.py` | Prints the OANDA account ID and environment for a token |
+| `scripts/setup.sh` | First-run verification: `make setup`. Sends one real message |
 | `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
 
 ---
@@ -127,11 +128,22 @@ and a first alert, in order.
 image. Copy `.env.example` to `.env` and fill it, then check it:
 
 ```bash
-cp .env.example .env     # then edit: OANDA token + account, Telegram bot token + chat IDs
-make whoami              # discovers AURION_OANDA_ACCOUNT_ID and _ENV from the token
-make preflight           # names each missing variable and what breaks without it
-make run                 # or: docker compose -f deploy/docker-compose.yml up -d
+cp .env.example .env     # then edit: OANDA token, Telegram bot token, your chat ID
+make setup               # verifies the whole chain and sends you one real message
+docker compose -f deploy/docker-compose.yml up -d
 ```
+
+`make setup` checks each link in order and stops at the first break, because a later check
+passing tells you nothing if an earlier one failed: the env file, the OANDA account (which
+it discovers from the token if missing), the preflight, `getMe`, **one real Telegram
+message**, then the calendar. The message is the only proof delivery works end to end, and
+if it fails on `chat not found` the script tells you to send the bot `/start` — a bot cannot
+open a conversation with a user, so until you do that every send is refused.
+
+**It is a long-running service, not a periodic job.** It holds a price stream and evaluates
+on bar close; a cron job would miss closes and reconnect constantly. `docker compose` with
+`restart: unless-stopped` plus the healthcheck, or `deploy/aurion.service` for systemd, is
+what keeps it up across crashes and reboots. Nothing needs to re-trigger it.
 
 The account ID is not derivable from the token and the token only authenticates against one
 of OANDA's two hosts, so `make whoami` reads `/v3/accounts` and prints both as `.env` lines
