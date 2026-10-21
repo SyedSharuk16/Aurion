@@ -6,7 +6,32 @@ Linux box works; the resource budget in `docs/01-architecture.md` §8 targets 1 
 1–2 GB, and the compose file caps memory at 900 MB so an unexpected climb restarts the
 container instead of inviting the host OOM killer.
 
+## Choosing the box
+
+| Hetzner | | Verdict |
+|---|---|---|
+| cpx02 | 1 vCPU, 1 GB | **too small.** The container is capped at 900 MB and numpy plus matplotlib plus six instruments' hot windows will reach it |
+| **cpx12** | **1 vCPU, 2 GB, 40 GB** | **this one.** Matches the 1 vCPU / 1–2 GB budget in `docs/01` §8 |
+| cpx22+ | 2+ vCPU | only worth it to run backtests on the same box, which is an offline activity |
+
+- **Image:** Ubuntu 24.04.
+- **Location:** any. The system is bar-close driven, so a few tens of milliseconds to OANDA
+  are irrelevant; pick what is cheap or near you.
+- **SSH key:** add one. Otherwise the root password is emailed, which is worse.
+- **Backups (+20%):** skip. The only irreplaceable thing is your `.env`, which lives on your
+  own machine; the database is re-derivable from OANDA by deleting it and restarting.
+- **Volumes, placement groups:** no.
+- **Firewall:** deny all inbound except SSH. Nothing here listens on a public port — the bot
+  connects *out* to OANDA and Telegram and accepts nothing. `deploy/cloud-init.yaml` sets
+  this up with ufw.
+
+Paste `deploy/cloud-init.yaml` into the **Cloud config** box. It installs Docker, creates an
+`aurion` user, clones the repo, builds the venv and locks the firewall down — and
+deliberately carries **no secrets**, because cloud-init user data is stored by the provider
+and readable from inside the instance. You copy `.env` over afterwards with one `scp`.
+
 ## On the server
+
 
 ```bash
 git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git

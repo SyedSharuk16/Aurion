@@ -1,0 +1,61 @@
+#cloud-config
+# Paste into Hetzner's "Cloud config" box when creating the server.
+#
+# Deliberately does NOT contain secrets: cloud-init user data is stored by the provider and
+# readable from inside the instance for the life of the server. The .env is copied over by
+# hand afterwards, which takes one scp.
+#
+# It leaves the app stopped. Starting before `scripts/setup.py` has proved delivery would
+# give you a container that cannot send anything and looks identical to one with no signals.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - git
+  - python3-venv
+  - python3-pip
+  - docker.io
+  - docker-compose-v2
+  - ufw
+
+users:
+  - name: aurion
+    groups: [docker, sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    # Reuses the SSH key you selected in the Hetzner UI, so there is no password to lose.
+    ssh_authorized_keys: []
+
+write_files:
+  - path: /etc/aurion-next-steps.txt
+    permissions: "0644"
+    content: |
+      Aurion is cloned at /home/aurion/Aurion and NOT running yet.
+
+      From your laptop:
+          scp .env aurion@<SERVER_IP>:/home/aurion/Aurion/.env
+          scp data/calendar.json aurion@<SERVER_IP>:/home/aurion/Aurion/data/
+
+      Then on the server:
+          ssh aurion@<SERVER_IP>
+          cd Aurion
+          . .venv/bin/activate
+          python scripts/setup.py          # proves delivery; sends one Telegram message
+          deactivate
+          docker compose -f deploy/docker-compose.yml up -d --build
+          docker compose -f deploy/docker-compose.yml logs -f
+
+runcmd:
+  # Outbound only. Nothing here listens on a public port: the bot connects out to OANDA and
+  # Telegram and accepts nothing, so only SSH needs to be reachable.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow OpenSSH
+  - ufw --force enable
+  - systemctl enable --now docker
+  - su - aurion -c "git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurion.git"
+  - su - aurion -c "cd Aurion && python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'"
+  - su - aurion -c "cp Aurion/.env.example Aurion/.env"
+  - chown -R aurion:aurion /home/aurion/Aurion
+  - cat /etc/aurion-next-steps.txt > /etc/motd
