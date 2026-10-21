@@ -46,6 +46,7 @@ from aurion.notify.telegram.bot import (
 from aurion.notify.telegram.charts import ChartAnnotation, render_signal_chart
 from aurion.notify.telegram.formatters import format_signal, format_transition
 from aurion.notify.telegram.outbox import Outbox, OutboxKind, OutboxMessage, dedupe_key
+from aurion.runtime.env import load_dotenv
 from aurion.runtime.logging import configure, log_candidate
 from aurion.sessions.calendar import (
     CalendarProvider,
@@ -588,6 +589,9 @@ def preflight(env: Mapping[str, str], mode: str) -> list[PreflightFinding]:
 
 def build_app(config_path: str | Path | None = None) -> AurionApp:
     """Construct the live app from config and the environment."""
+    # Before anything reads os.environ. Nothing used to load `.env`, so running the module
+    # directly saw an empty environment and refused to start with a filled-in file beside it.
+    env_warnings = load_dotenv(os.environ.get("AURION_ENV_FILE", ".env"))
     cfg = load_config(config_path or os.environ.get("AURION_CONFIG_PATH", "config.yaml"))
     configure(
         level=os.environ.get("AURION_LOG_LEVEL", "INFO"),
@@ -603,6 +607,12 @@ def build_app(config_path: str | Path | None = None) -> AurionApp:
         stream_idle_timeout_s=cfg.adapter.stream_idle_timeout_s,
         points={s: i.point for s, i in cfg.enabled_instruments.items()},
     )
+    for warning in env_warnings:
+        # Reported rather than silently cleaned: docker compose's env_file parser keeps the
+        # whitespace and the inline comment, so an uncorrected file behaves differently
+        # depending on how the process was launched.
+        _log.warning(".env %s", warning.render())
+
     findings = preflight(os.environ, cfg.meta.mode)
     for finding in findings:
         _log.log(

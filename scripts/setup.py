@@ -50,8 +50,8 @@ def step(msg: str) -> None:
     print(f"\n{msg}")
 
 
-def load_env() -> dict[str, str]:
-    """Read .env into os.environ without overwriting a value already set there."""
+def load_env() -> None:
+    """Load .env through the same parser the runtime uses, and report what it cleaned."""
     path = ROOT / ".env"
     if not path.exists():
         die(
@@ -59,15 +59,10 @@ def load_env() -> dict[str, str]:
             "         Windows (cmd):  copy .env.example .env\n"
             "         bash/macOS:     cp .env.example .env"
         )
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        # A trailing comment is only a comment when something precedes it on the line.
-        value = value.split(" #")[0].strip().strip("'\"")
-        os.environ.setdefault(key.strip(), value)
-    return dict(os.environ)
+    from aurion.runtime.env import load_dotenv
+
+    for warning in load_dotenv(path):
+        warn(warning.render())
 
 
 def telegram(method: str, **params: str) -> dict[str, object]:

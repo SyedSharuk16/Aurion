@@ -61,6 +61,7 @@ from aurion.notify.telegram.outbox import (
     dedupe_key,
 )
 from aurion.runtime.app import CHART_BARS, AurionApp, preflight
+from aurion.runtime.env import load_dotenv, parse_dotenv
 from aurion.runtime.logging import JsonFormatter, configure, log_candidate, redact
 from aurion.sessions.gates import build_window_set
 from aurion.signals.engine import Candidate, Step
@@ -1037,3 +1038,61 @@ def test_every_message_this_system_sends_is_valid_markdown_v2(ctx, cascade_snaps
     ):
         _assert_prose_is_escaped(alert.render(), f"alert:{label}")
         _assert_code_spans_clean(alert.render(), f"alert:{label}")
+
+
+# -- .env loading ------------------------------------------------------------
+def test_a_real_world_env_file_parses_and_reports_what_it_cleaned():
+    """Modelled on an actual file: an inline comment, a leading space after `=`, and
+    trailing spaces. The loader accepts all three and says so, because docker compose's
+    env_file parser keeps them -- so an uncorrected file authenticates when run directly
+    and fails under compose, with identical contents."""
+    values, warnings = parse_dotenv(
+        "# comment line\n"
+        "AURION_OANDA_ENV=practice            # practice | live\n"
+        "AURION_TELEGRAM_BOT_TOKEN= 123:ABC\n"
+        "AURION_TELEGRAM_SIGNAL_CHAT_ID=100200300 \n"
+        "AURION_TELEGRAM_ALLOWED_USER_IDS=    # comma-separated\n"
+    )
+    assert values["AURION_OANDA_ENV"] == "practice"
+    assert values["AURION_TELEGRAM_BOT_TOKEN"] == "123:ABC"
+    assert values["AURION_TELEGRAM_SIGNAL_CHAT_ID"] == "100200300"
+    assert values["AURION_TELEGRAM_ALLOWED_USER_IDS"] == ""
+    flagged = {w.variable for w in warnings}
+    assert flagged == {
+        "AURION_OANDA_ENV",
+        "AURION_TELEGRAM_BOT_TOKEN",
+        "AURION_TELEGRAM_ALLOWED_USER_IDS",
+    }
+
+
+def test_a_hash_without_preceding_whitespace_stays_in_the_value():
+    """Otherwise a secret containing `#` would be silently truncated to nothing useful."""
+    values, warnings = parse_dotenv("KEY=abc#def\n")
+    assert values["KEY"] == "abc#def"
+    assert warnings == []
+
+
+def test_quotes_and_export_prefixes_are_handled():
+    values, _ = parse_dotenv("export KEY='abc'\nOTHER=\"d e f\"\n")
+    assert values == {"KEY": "abc", "OTHER": "d e f"}
+
+
+def test_a_real_environment_variable_wins_over_the_file(tmp_path):
+    """So a container, a systemd unit or a shell export overrides without editing a file."""
+    path = tmp_path / ".env"
+    path.write_text("KEY=from_file\nOTHER=from_file\n", encoding="utf-8")
+    env = {"KEY": "from_environment"}
+    load_dotenv(path, env)
+    assert env == {"KEY": "from_environment", "OTHER": "from_file"}
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path):
+    """A deployment that supplies the environment directly has no .env."""
+    env: dict[str, str] = {}
+    assert load_dotenv(tmp_path / "nope.env", env) == []
+    assert env == {}
+
+
+def test_blank_and_malformed_lines_are_skipped():
+    values, _ = parse_dotenv("\n\n# only a comment\nnot_an_assignment\n=novalue\nK=v\n")
+    assert values == {"K": "v"}
