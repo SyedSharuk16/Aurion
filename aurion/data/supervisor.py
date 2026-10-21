@@ -39,7 +39,7 @@ from aurion.data.adapters.base import AdapterError, DataAdapter
 from aurion.data.repository import InMemoryBarRepository
 from aurion.data.resample import ResamplerSet
 from aurion.data.store import Store
-from aurion.data.types import Heartbeat, M1Candle, Quote
+from aurion.data.types import Bar, Heartbeat, M1Candle, Quote
 
 _log = logging.getLogger(__name__)
 
@@ -109,35 +109,50 @@ class IngestSupervisor:
             await self._bus.publish(event)
 
     async def ingest(self, candles: Sequence[M1Candle], persist: bool = True) -> list[BarClosed]:
-        """Push candles through store, hot window and resamplers, in that order."""
+        """Push candles through store, hot window and resamplers, in that order.
+
+        The store write is **one transaction for the whole call**, not one per candle. Per
+        candle it was ~259,000 transactions per instrument for a cold start, each an fsync;
+        measured on a WSL `/mnt/c` checkout that is roughly a day of backfill every ten
+        minutes, so 180 days would have taken over a day and hit `database is locked`
+        along the way. Resampled bars are batched for the same reason.
+        """
         closed: list[BarClosed] = []
+        fresh: list[M1Candle] = []
         for candle in candles:
             try:
                 self._repo.add_m1(candle)
             except ValueError:
                 # Already in the hot window. Backfill overlaps by one bar at every seam by
-                # design, so this is expected rather than exceptional. Counted once, and
-                # the store write is skipped because it would be a no-op round trip.
+                # design, so this is expected rather than exceptional.
                 self.stats.duplicates_dropped += 1
                 continue
-            if persist:
-                written = await self._store.upsert_m1([candle])
-                if written == 0:
-                    # In the store but not in the hot window: a restart or a prune. Still
-                    # resampled, because the hot window is being rebuilt.
-                    self.stats.already_stored += 1
+            fresh.append(candle)
+
+        if persist and fresh:
+            written = await self._store.upsert_m1(fresh)
+            # In the store but not in the hot window: a restart or a prune. Still
+            # resampled, because the hot window is being rebuilt.
+            self.stats.already_stored += max(len(fresh) - written, 0)
+
+        pending_bars: list[Bar] = []
+        for candle in fresh:
             self.stats.candles_ingested += 1
             self.stats.last_candle_at[candle.instrument] = candle.close_time
             await self._publish(M1Ingested(candle))
 
             for bar in self._resamplers[candle.instrument].push(candle):
                 self._repo.add_bar(bar)
-                if persist:
-                    await self._store.upsert_bars([bar])
+                pending_bars.append(bar)
                 self.stats.bars_closed += 1
-                event = BarClosed(bar)
-                closed.append(event)
-                await self._publish(event)
+                closed.append(BarClosed(bar))
+
+        if persist and pending_bars:
+            await self._store.upsert_bars(pending_bars)
+        # Published only after both writes land, so a subscriber that reads the store sees
+        # what the event says exists.
+        for event in closed:
+            await self._publish(event)
         return closed
 
     async def close_stale_bars(self, instrument: str, now: datetime) -> list[BarClosed]:

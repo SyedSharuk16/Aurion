@@ -114,8 +114,17 @@ def log_candidate(
     reason: str | None,
     **extra: Any,
 ) -> None:
-    """One structured line per candidate, accepted or rejected."""
-    logger.info(
+    """One structured line per candidate, accepted or rejected.
+
+    An emission is INFO; a rejection is DEBUG. Every evaluation logged at INFO is ~17,000
+    lines for a 180-day replay, all of them `bias:htf_structure_unavailable` while the
+    warm-up elapses, which buries the startup warnings and the alerts that matter. The
+    counts are not lost: `HealthMonitor.counters.rejections_by_reason` aggregates them and
+    the heartbeat and `/status` report the breakdown.
+    """
+    level = logging.INFO if reason is None else logging.DEBUG
+    logger.log(
+        level,
         "candidate",
         extra={
             "instrument": instrument,

@@ -512,13 +512,32 @@ def test_candidate_lines_are_structured_json():
     log = logging.getLogger("aurion.test.candidate")
     log.handlers = [handler]
     log.propagate = False
-    log.setLevel(logging.INFO)
+    # DEBUG, because a rejection is logged at DEBUG: at INFO a 180-day replay writes
+    # ~17,000 identical warm-up lines and buries everything else.
+    log.setLevel(logging.DEBUG)
     log_candidate(log, "XAUUSD", T0, "decision", "decision:er_below", p_hat=0.3)
     payload = json.loads(buf.getvalue().strip())
     assert payload["decision"] == "rejected"
     assert payload["rejected_reason"] == "decision:er_below"
     assert payload["instrument"] == "XAUUSD"
     assert payload["p_hat"] == 0.3
+
+
+def test_a_rejection_is_quiet_but_an_emission_is_not():
+    """The distinction that keeps a backfill readable without losing the signal."""
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(JsonFormatter())
+    log = logging.getLogger("aurion.test.levels")
+    log.handlers = [handler]
+    log.propagate = False
+    log.setLevel(logging.INFO)
+
+    log_candidate(log, "XAUUSD", T0, "htf_bias", "bias:htf_structure_unavailable")
+    assert buf.getvalue() == "", "a rejection must not reach an INFO handler"
+
+    log_candidate(log, "XAUUSD", T0, "emitted", None)
+    assert json.loads(buf.getvalue().strip())["decision"] == "emitted"
 
 
 def test_emitted_candidates_are_marked_as_such():

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -32,6 +33,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     delete,
+    event,
     select,
 )
 from sqlalchemy.ext.asyncio import (
@@ -45,6 +47,34 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from aurion.core.timeframe import UTC, TimeFrame
 from aurion.data.types import OHLC, Bar, M1Candle
 
+#: Seconds SQLite waits for a lock before giving up. The default is 0, so any contention --
+#: the outbox committing while a backfill writes, or a second process -- raises
+#: `database is locked` immediately rather than waiting a moment. Observed on a first live
+#: run during the cold-start backfill.
+SQLITE_BUSY_TIMEOUT_S = 30
+
+
+def _apply_sqlite_pragmas(engine: AsyncEngine) -> None:
+    """WAL and a busy timeout, set on every new connection.
+
+    WAL lets a reader and a writer proceed at once, which is the normal state here: the
+    ingest loop writes candles while the outbox commits messages and the engine reads bars.
+    Under the default rollback journal they serialise and then fail outright.
+
+    `synchronous=NORMAL` is the right trade with WAL: a crash can lose the last commits but
+    cannot corrupt the file, and the alternative costs an fsync per transaction on a
+    filesystem that may be a Windows mount seen through WSL.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_S * 1000}")
+        finally:
+            cursor.close()
 
 class Base(DeclarativeBase):
     pass
@@ -186,6 +216,8 @@ class Store:
 
     def __init__(self, url: str, adapter_name: str = "oanda", echo: bool = False) -> None:
         self._engine: AsyncEngine = create_async_engine(url, echo=echo, future=True)
+        if url.startswith("sqlite"):
+            _apply_sqlite_pragmas(self._engine)
         self._session = async_sessionmaker(self._engine, expire_on_commit=False)
         self._adapter_name = adapter_name
 
