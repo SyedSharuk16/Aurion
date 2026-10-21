@@ -2,16 +2,38 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
 
-from aurion.analysis.base import Direction
+from aurion.analysis.base import Direction, TrendState
+from aurion.analysis.ict.fvg import FVG
 from aurion.analysis.ict.pd_range import DealingRange
+from aurion.analysis.regime.correlation import session_vwap
+from aurion.analysis.regime.trend import trend_regime_state
+from aurion.analysis.regime.volatility import volatility_state
+from aurion.analysis.registry import AnalysisParams, AnalysisSnapshot, ObjectStore
 from aurion.analysis.sr.levels import SRLevel
+from aurion.analysis.structure.trend import Structure
+from aurion.core.marketview import MarketView
 from aurion.core.timeframe import UTC, TimeFrame
+from aurion.data.repository import InMemoryBarRepository
+from aurion.sessions.gates import GateResult
 from aurion.signals.bias import htf_bias
+from aurion.signals.engine import (
+    EngineParams,
+    EvaluationContext,
+    InstrumentMeta,
+    SignalEngine,
+    Step,
+)
+from aurion.signals.entries import (
+    EntryModel,
+    propose_silver_bullet_fvg,
+    propose_sweep_mss_retrace,
+)
 from aurion.signals.geometry import (
     Target,
     TargetKind,
@@ -38,7 +60,7 @@ from aurion.signals.model import (
     reliability_curve,
 )
 from aurion.signals.sizing import position_size, value_per_price_unit
-from tests.conftest import make_m1
+from tests.conftest import make_m1, zigzag
 
 T0 = datetime(2024, 6, 12, 9, 0, tzinfo=UTC)
 
@@ -407,3 +429,315 @@ def test_manager_tracks_active_signals_per_instrument():
     manager.add(_signal(signal_id="b", instrument="XAUUSD"))
     assert manager.has_active("EURUSD") and manager.has_active("XAUUSD")
     assert len(manager.active_for("EURUSD")) == 1
+
+# -- the cascade -------------------------------------------------------------
+# A real M15 series carrying a genuine sweep -> CHoCH -> MSS, found by search over
+# deterministic zigzags: the three-candle, swing and displacement definitions are strict
+# enough that a hand-written series almost never produces one, and a fixture that produces
+# no MSS makes every assertion past step 3 vacuous (which is how the breaker test in
+# test_analysis_ict ended up asserting nothing).
+MSS_DELTAS = [
+    6.0, 1.03, -0.29, -1.34, 0.61, -1.73, -1.29, -0.49, -2.05, -0.44, 1.28, -5.0, 0.0,
+    0.58, -0.16, -1.58, 0.46, -0.42, 1.06, 1.8, -0.31, 0.33, -6.0, 1.52, 0.74, 0.67,
+    1.66, 0.62, 0.37, -1.19, -1.4, -1.65, -0.3, 6.0, 0.56, -1.77, -0.35, 1.24, 0.94,
+    0.57, -1.1, -0.34, -0.2, 0.53, -6.0, 0.08, 0.71, 1.64, 1.74, -0.76, -2.15, 1.46,
+    1.8, -1.73, -1.09, -5.0, -1.49, 1.24, 1.94, 0.08,
+]
+CASCADE_PARAMS = AnalysisParams(
+    point=0.01,
+    swing_half_width=2,
+    displacement_k=0.8,
+    fvg_min_atr=0.05,
+    sweep_min_penetration_atr=0.02,
+)
+
+
+class _StubGate:
+    """Admissibility is tested in `test_gates.py`; here it is an input, not the subject."""
+
+    def __init__(self, admissible: bool = True, reason: str = "") -> None:
+        self._result = GateResult(
+            admissible=admissible,
+            reasons=() if admissible else (reason,),
+            window_label="ny_am_kz",
+            windows=("ny_am_kz",),
+            details={"minutes_into_week": 600},
+        )
+
+    def evaluate(self, instrument, as_of, view, spread=None):
+        return self._result
+
+
+def _cascade_world():
+    bars = zigzag(MSS_DELTAS, timeframe=TimeFrame.M15)
+    repo = InMemoryBarRepository()
+    for bar in bars:
+        repo.add_bar(bar)
+    as_of = bars[-1].close_time
+    view = MarketView(repo, as_of)
+    store = ObjectStore(CASCADE_PARAMS)
+    snapshot = store.snapshot(view, "TEST", TimeFrame.M15, window=500, with_levels=True)
+    assert snapshot.mss, "fixture no longer contains an MSS; every step past 3 would be vacuous"
+    return view, store, snapshot, as_of
+
+
+def _htf(snapshot, as_of, *, state: TrendState, with_target: bool = True):
+    """An HTF snapshot with a chosen structure, and optionally a far opposing array.
+
+    HTF snapshots arrive through the context, so this is the engine's intended seam: the
+    alternative is searching for a multi-timeframe series that happens to trend, which would
+    make the test about the search.
+    """
+    structure = Structure(
+        state, as_of, False, False, True, True, snapshot.bars[-1].ohlc.h, snapshot.bars[-1].ohlc.l
+    )
+    fvgs = list(snapshot.fvgs)
+    if with_target:
+        # A bullish H1 gap far below: the only thing a short in this series can target at 2R.
+        fvgs.append(
+            FVG(
+                "TEST",
+                TimeFrame.H1,
+                Direction.UP,
+                73.0,
+                74.0,
+                2.0,
+                as_of - timedelta(hours=8),
+                as_of - timedelta(hours=7),
+            )
+        )
+    return AnalysisSnapshot(
+        "TEST",
+        TimeFrame.H4,
+        as_of,
+        snapshot.bars,
+        snapshot.atr,
+        swings=snapshot.swings,
+        structure=structure,
+        breaks=snapshot.breaks,
+        fvgs=fvgs,
+        order_blocks=snapshot.order_blocks,
+        pools=snapshot.pools,
+        sweeps=snapshot.sweeps,
+        mss=snapshot.mss,
+        dealing_range=snapshot.dealing_range,
+    )
+
+
+def _engine(store, gate=None, **overrides):
+    defaults = {
+        "require_w1_d1_agreement": False,
+        "rr_min": 2.0,
+        # Permissive on purpose: the decision rule has its own tests, and a cascade test
+        # that fails at step 8 tells you nothing about steps 1-7.
+        "expected_r_min": -9.0,
+        "p_floor": 0.0,
+        "mss_window_bars": 20,
+    }
+    params = EngineParams(**{**defaults, **overrides})
+    return SignalEngine(
+        params,
+        store,
+        gate or _StubGate(),
+        {"TEST": InstrumentMeta(0.01, 100.0, "XAU", "USD")},
+        ConstantProbabilityModel(p=0.55),
+    )
+
+
+def _context(snapshot, as_of, **overrides):
+    htf = overrides.pop("htf", None)
+    bars = list(snapshot.bars)
+    return EvaluationContext(
+        entry_timeframe=TimeFrame.M15,
+        htf=htf if htf is not None else dict.fromkeys(("W1", "D1", "H4", "H1")),
+        volatility=volatility_state(bars, percentile_window=40),
+        regime_trend=trend_regime_state(bars, vr_window=40),
+        vwap=session_vwap(bars, bars[0].open_time),
+        weekday=as_of.weekday(),
+        spread=0.2,
+        reference_levels={"pdh": bars[-1].ohlc.c + 5},
+        **overrides,
+    )
+
+
+def _bearish_context(snapshot, as_of, **kwargs):
+    htf_snap = _htf(snapshot, as_of, state=TrendState.BEARISH, **kwargs)
+    return _context(snapshot, as_of, htf=dict.fromkeys(("W1", "D1", "H4", "H1"), htf_snap))
+
+
+def test_the_cascade_emits_a_complete_signal():
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+
+    assert candidate.emitted, candidate.rejected_reason
+    assert candidate.rejected_reason is None
+    assert candidate.reached_step is Step.EMITTED
+    geometry = candidate.geometry
+    assert geometry is not None
+    assert geometry.direction is Direction.DOWN
+    assert geometry.stop_loss > geometry.entry, "a short's stop sits above its entry"
+    assert geometry.targets and all(t.price < geometry.entry for t in geometry.targets)
+    assert geometry.rr1 is not None and geometry.rr1 >= 2.0
+    assert candidate.p_hat == pytest.approx(0.55)
+    assert candidate.expected_r == pytest.approx(0.55 * geometry.rr1 - 0.45)
+    assert candidate.signal_id
+
+
+def test_the_pilot_model_emits_no_reasons_even_on_an_emitted_signal():
+    """A constant probability has no attribution. Inventing three would be the lie."""
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert candidate.emitted
+    assert candidate.reasons == ()
+
+
+def test_a_ranging_higher_timeframe_stops_the_cascade_at_step_one():
+    view, store, snapshot, as_of = _cascade_world()
+    htf_snap = _htf(snapshot, as_of, state=TrendState.RANGING)
+    context = _context(snapshot, as_of, htf=dict.fromkeys(("W1", "D1", "H4", "H1"), htf_snap))
+    candidate = _engine(store).evaluate(view, "TEST", as_of, context, 500)
+    assert candidate.reached_step is Step.HTF_BIAS
+    assert candidate.rejected_reason == "bias:no_directional_structure"
+    assert candidate.geometry is None and candidate.p_hat is None
+
+
+def test_no_higher_timeframe_array_in_range_stops_the_cascade_at_step_two():
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store, pd_max_dist_atr=0.0).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert candidate.reached_step is Step.HTF_ARRAY
+    assert candidate.rejected_reason == "pd:no_htf_array_in_range"
+    assert candidate.direction is Direction.DOWN, "the bias it got is still recorded"
+
+
+def test_no_entry_model_firing_stops_the_cascade_at_step_three():
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store, mss_window_bars=0).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert candidate.reached_step is Step.ENTRY_MODEL
+    assert candidate.rejected_reason == "entry:no_model_fired"
+    assert candidate.htf_array is not None, "the array it found is still recorded"
+
+
+def test_an_inadmissible_gate_stops_the_cascade_at_step_four():
+    view, store, snapshot, as_of = _cascade_world()
+    gate = _StubGate(admissible=False, reason="session:no_signal_window")
+    candidate = _engine(store, gate=gate).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert candidate.reached_step is Step.GATES
+    assert candidate.rejected_reason == "session:no_signal_window"
+    assert candidate.proposal is not None, "the proposal it built is still recorded"
+
+
+def test_no_target_at_the_rr_floor_stops_the_cascade_at_step_five():
+    """Without the far opposing array there is no level 2R away, so the geometry refuses."""
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of, with_target=False), 500
+    )
+    assert candidate.reached_step is Step.GEOMETRY
+    assert candidate.rejected_reason == "no_target_at_min_rr"
+
+
+def test_a_candidate_below_the_expectancy_floor_is_rejected_carrying_its_numbers():
+    """The gate is on calibrated expectancy, not on a score, so the numbers must survive
+    the rejection -- otherwise the funnel cannot say how far short it fell."""
+    view, store, snapshot, as_of = _cascade_world()
+    candidate = _engine(store, expected_r_min=5.0).evaluate(
+        view, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert not candidate.emitted
+    assert candidate.rejected_reason is not None
+    assert candidate.p_hat == pytest.approx(0.55)
+    assert candidate.expected_r is not None and candidate.expected_r < 5.0
+
+
+def test_an_empty_view_is_rejected_rather_than_evaluated():
+    _, store, snapshot, as_of = _cascade_world()
+    empty = MarketView(InMemoryBarRepository(), as_of)
+    candidate = _engine(store).evaluate(
+        empty, "TEST", as_of, _bearish_context(snapshot, as_of), 500
+    )
+    assert candidate.rejected_reason == "data:no_bars"
+
+
+# -- entry models ------------------------------------------------------------
+def _sb_fvg(as_of, offset_minutes: int, direction=Direction.DOWN, lo=90.0, hi=92.0):
+    confirmed = as_of + timedelta(minutes=offset_minutes)
+    return FVG(
+        "TEST", TimeFrame.M15, direction, lo, hi, 2.0, confirmed - timedelta(minutes=15), confirmed
+    )
+
+
+def test_the_silver_bullet_model_takes_the_most_recent_gap_inside_the_window():
+    _, _, snapshot, as_of = _cascade_world()
+    window_start = as_of - timedelta(minutes=45)
+    old = _sb_fvg(as_of, -30, lo=80.0, hi=82.0)
+    recent = _sb_fvg(as_of, -15, lo=90.0, hi=92.0)
+    snap = replace(snapshot, fvgs=[old, recent])
+
+    proposal = propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start)
+    assert proposal is not None
+    assert proposal.model is EntryModel.SILVER_BULLET_FVG
+    assert proposal.entry == pytest.approx(91.0), "the CE of the most recent gap"
+    assert proposal.sweep is None and proposal.mss is None
+    assert not proposal.has_sweep
+    assert "Silver Bullet window closes" in proposal.invalidation
+
+
+def test_the_silver_bullet_model_ignores_a_gap_formed_before_the_window_opened():
+    """The window IS the model. A gap from an hour earlier is the other model's setup."""
+    _, _, snapshot, as_of = _cascade_world()
+    snap = replace(snapshot, fvgs=[_sb_fvg(as_of, -90)])
+    window_start = as_of - timedelta(minutes=45)
+    assert propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start) is None
+
+
+def test_the_silver_bullet_model_ignores_a_gap_confirmed_after_as_of():
+    _, _, snapshot, as_of = _cascade_world()
+    snap = replace(snapshot, fvgs=[_sb_fvg(as_of, +15)])
+    window_start = as_of - timedelta(hours=1)
+    assert propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start) is None
+
+
+def test_the_silver_bullet_model_ignores_the_wrong_polarity():
+    _, _, snapshot, as_of = _cascade_world()
+    snap = replace(snapshot, fvgs=[_sb_fvg(as_of, -15, direction=Direction.UP)])
+    window_start = as_of - timedelta(minutes=45)
+    assert propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start) is None
+    assert propose_silver_bullet_fvg(snap, Direction.UP, as_of, window_start) is not None
+
+
+def test_the_entry_level_can_be_the_proximal_edge_instead_of_the_midpoint():
+    _, _, snapshot, as_of = _cascade_world()
+    snap = replace(snapshot, fvgs=[_sb_fvg(as_of, -15, lo=90.0, hi=92.0)])
+    window_start = as_of - timedelta(minutes=45)
+    ce = propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start, fvg_level="ce")
+    edge = propose_silver_bullet_fvg(snap, Direction.DOWN, as_of, window_start, fvg_level="edge")
+    assert ce is not None and edge is not None
+    assert (ce.entry, ce.entry_array_label) == (pytest.approx(91.0), "fvg_ce")
+    # A bearish gap is entered from below, so its proximal edge is the low.
+    assert (edge.entry, edge.entry_array_label) == (pytest.approx(90.0), "fvg_edge")
+
+
+def test_the_primary_model_refuses_an_mss_confirmed_after_as_of():
+    """Causality at the model boundary, not only at the MarketView."""
+    _, _, snapshot, _ = _cascade_world()
+    mss = snapshot.mss[-1]
+    assert propose_sweep_mss_retrace(snapshot, mss.direction, mss.confirmed_at, 20) is not None
+    before = mss.confirmed_at - timedelta(minutes=1)
+    assert propose_sweep_mss_retrace(snapshot, mss.direction, before, 20) is None
+
+
+def test_the_primary_model_refuses_when_no_array_survives_the_filters():
+    _, _, snapshot, as_of = _cascade_world()
+    mss = snapshot.mss[-1]
+    stripped = replace(snapshot, fvgs=[], order_blocks=[])
+    assert propose_sweep_mss_retrace(stripped, mss.direction, as_of, 20) is None

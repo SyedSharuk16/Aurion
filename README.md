@@ -62,29 +62,28 @@ make all         # lint + types + coverage + causality
 make power       # regenerate every table in docs/07
 ```
 
-Current state: **446 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
+Current state: **462 tests**, `ruff` clean, `mypy --strict` clean on 84 source files.
 Branch coverage by package, because the aggregate hides the distribution:
 
 | Package | Coverage | |
 |---|---|---|
 | `core/` | 94% | |
-| `analysis/` | **92%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
+| `signals/` | 94% | the cascade, entry models, geometry, model, lifecycle |
+| `analysis/` | **93%** | the contractual gate is 80% on analysis modules (`docs/04` §8) |
 | `sessions/` | 92% | |
 | `data/` | 88% | |
 | `backtest/` | 87% | |
-| `features/` | 86% | |
-| `signals/` | 78% | `engine.py` 56%, `entries.py` 42% -- see below |
+| `features/` | 87% | |
 | `notify/` | 72% | |
 | `runtime/` | 48% | `app.py` 40%: asyncio wiring, reconnect loops, signal handlers |
-| Total | 85% | |
+| Total | 87% | |
 
-The weak numbers are stated rather than papered over. `signals/entries.py` at 42% and
-`runtime/app.py` at 40% are the two real gaps. Both are exercised end-to-end -- the entry
-models by the backtest runner replaying M1 through the live engine, the composition root by
-constructing the app and driving its alert path -- but a unit-coverage counter sees only the
-lines a direct test touches, and unit tests for an asyncio composition root mostly assert
-that mocks were called. The honest reading is that decision logic is well covered and
-process wiring is not, and process wiring is what the Phase 2E pilot exercises first.
+`runtime/app.py` at 40% is the one real gap and it is stated rather than papered over. It is
+the composition root: asyncio wiring, reconnect loops and signal handlers, where unit tests
+mostly assert that mocks were called. The decision path it drives is covered directly --
+`signals/engine.py` is at 93% through a full-cascade test on a real M15 series carrying a
+genuine sweep, CHoCH and MSS, asserting the outcome at each of the eight steps -- so what is
+uncovered is process wiring, which is what the Phase 2E pilot exercises first.
 
 What exists and is tested:
 

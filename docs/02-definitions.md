@@ -463,6 +463,13 @@ Mirror for bearish. `mitigated_at` = `close_time` of the first bar reaching `fil
 A mitigated FVG is retained in the database (it is a feature input: "price is at a
 previously mitigated FVG") but is excluded from "available PD array" queries.
 
+**What "available" means**, since this was ambiguous enough to cause a defect: available
+means *usable as a PD array in its effective direction*, not *usable in the polarity it was
+created with*. `MITIGATED` is unavailable. `INVERTED` is **available**, in the opposite
+polarity (§5.2) -- excluding it removed the inverse FVG from every decision path while
+leaving the detector and this definition in place. Every consumer tests availability and
+effective direction together, so the two must mean the same thing.
+
 ### 5.2 Inverse FVG — `exact`
 
 A bullish FVG becomes an **inverse FVG (bearish polarity)** at the first bar `t > i+1` with
@@ -501,6 +508,11 @@ bullish OB at j  →  bearish breaker  iff
    ∧ ∃ v ∈ (u, u + W_brk] : BOS_down(v) ∨ CHoCH_down(v)
 ```
 `confirmed_at = close_time(v)`. Parameters: `W_brk` default 20 bars (`prior`).
+
+Availability, as in §5.1: invalidation is the *precondition* for becoming a breaker, so
+every breaker carries `state = INVALIDATED`. An invalidated block is therefore available
+exactly when the opposing break confirmed it as a breaker, and then only in the opposite
+polarity. Treating `INVALIDATED` as unavailable outright excludes every breaker.
 
 ### 5.5 Mitigation block — **DROPPED** (Q6)
 

@@ -165,6 +165,32 @@ no branch on mode. The acceptance test for this property: running the backtester
 window for which live signals were recorded must reproduce those signals exactly
 (`docs/04-validation-protocol.md` §9, live-vs-replay reconciliation).
 
+### 4.1 The context is the leak, and it leaked
+
+Three injected objects is not the whole surface. Each evaluation also needs an
+`EvaluationContext` — the per-instant inputs the engine does not compute itself (HTF
+snapshots, regime states, the Silver Bullet window, macro conditioners, the spread). Both
+paths built their own, and the two had drifted in opposite directions:
+
+| Field | Backtest runner | Live app |
+|---|---|---|
+| `silver_bullet_window_start` | set | **never set** → the second entry model could not fire |
+| `macro` | **never set** | set → a feature distribution no backtest row could contain |
+| `spread` | last closed M1 | live quote → unreproducible in replay by construction |
+| analysis window, HTF set | hard-coded in `RunnerConfig` | hard-coded in the bar handler |
+
+So the backtester would have validated a two-entry-model system with one feature
+distribution while the live process ran a one-model system with another. Neither was
+detectable by inspecting `analysis/` or `signals/` for a mode branch, because there was
+none: the divergence lived in the callers.
+
+The mechanism now: **one builder**, `signals/context.py::build_context`, used by both, with
+the window and HTF set as shared constants. `tests/unit/test_context.py` fails if any other
+module in `aurion/` constructs an `EvaluationContext` at all. The live-vs-replay
+reconciliation in `docs/04` §9 remains the acceptance test, but it cannot run until there is
+live history to reconcile against, which is precisely why this needed a structural check
+rather than a planned one.
+
 ---
 
 ## 5. Event flow
