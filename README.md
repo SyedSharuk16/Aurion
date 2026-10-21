@@ -49,6 +49,7 @@ the tag is removed. The tag is applied by the formatter, not by an operator's di
 | `docs/06-open-questions.md` | The 17 concepts that **cannot** be defined objectively and their testable substitutes; the 14 decisions (all resolved); pre-registered predictions with effect sizes. **A17 is open and needs a decision before the pilot** |
 | `docs/07-power-and-capacity.md` | Derived trial budget, minimum detectable effects, the module cut, the pilot spec, and two corrections to Phase 1 |
 | `tools/power.py` | Runnable calculator behind every number in `docs/07` |
+| `tools/oanda_whoami.py` | Prints the OANDA account ID and environment for a token |
 | `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
 
 ---
@@ -127,9 +128,17 @@ image. Copy `.env.example` to `.env` and fill it, then check it:
 
 ```bash
 cp .env.example .env     # then edit: OANDA token + account, Telegram bot token + chat IDs
+make whoami              # discovers AURION_OANDA_ACCOUNT_ID and _ENV from the token
 make preflight           # names each missing variable and what breaks without it
 make run                 # or: docker compose -f deploy/docker-compose.yml up -d
 ```
+
+The account ID is not derivable from the token and the token only authenticates against one
+of OANDA's two hosts, so `make whoami` reads `/v3/accounts` and prints both as `.env` lines
+to paste. **Send `/start` to your bot from the account that will receive alerts before you
+run anything** — Telegram forbids a bot from opening a conversation, so until you do, every
+send fails with 403 and the channel is silent for a reason that has nothing to do with this
+system.
 
 `make run` **refuses to start** without a price feed or a delivery channel rather than
 running as a process that looks healthy and sends nothing:

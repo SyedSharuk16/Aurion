@@ -1,4 +1,4 @@
-.PHONY: install test lint types cov causality power run preflight all clean
+.PHONY: install test lint types cov causality power run preflight whoami all clean
 
 install:
 	python3 -m pip install -e ".[dev]"
@@ -37,6 +37,10 @@ preflight:
 
 run:
 	python3 -m aurion.runtime.app
+
+# Discover the OANDA account ID and environment from the token. Reads /v3/accounts only.
+whoami:
+	python3 tools/oanda_whoami.py
 
 all: lint types cov causality
 
