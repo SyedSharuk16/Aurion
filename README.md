@@ -115,6 +115,56 @@ The adapter protocol has **no order-submission method**, and a test asserts it
 protocol, which is a visible diff. The Telegram layer is send-only: it has no handler that
 can reach `signals/` or `data/`, and the only commands are read-only plus `/pause`.
 
+## Actually running it — and why no alerts have arrived
+
+Nothing has ever been started. There is no `.env`, no database, no logs, and no market data
+in this repository, so no Telegram message has been sent or could have been. The code is
+built and tested; **the system has never run.** Four things stand between the current state
+and a first alert, in order.
+
+**1. Credentials.** Tokens come from the environment only, never from `config.yaml` or the
+image. Copy `.env.example` to `.env` and fill it, then check it:
+
+```bash
+cp .env.example .env     # then edit: OANDA token + account, Telegram bot token + chat IDs
+make preflight           # names each missing variable and what breaks without it
+make run                 # or: docker compose -f deploy/docker-compose.yml up -d
+```
+
+`make run` **refuses to start** without a price feed or a delivery channel rather than
+running as a process that looks healthy and sends nothing:
+
+```
+RuntimeError: refusing to start in mode 'paper' without AURION_OANDA_API_TOKEN,
+AURION_OANDA_ACCOUNT_ID, AURION_TELEGRAM_BOT_TOKEN, AURION_TELEGRAM_SIGNAL_CHAT_ID
+```
+
+**2. A news calendar, or you will get exactly one message and nothing else.**
+`news.fail_safe: block` is fixed per the brief, and with no calendar provider configured the
+provider reports itself unavailable, which blocks **every** signal. The first thing a
+correctly-configured bot sends is therefore the admin alert saying so:
+
+> 📅 Economic calendar unavailable. Under fail_safe=block EVERY signal is suppressed.
+
+That is the designed behaviour — a system with no news feed should not quietly trade through
+NFP — but it means `AURION_CALENDAR_PROVIDER` is not optional if you want signals.
+
+**3. History.** A cold start backfills the warm-up window (`data.m1_retention_days`, 180
+days) in 7-day slices, which is ~259k M1 candles per instrument over ~26 paginated OANDA
+requests. Until that completes there is no W1 structure, and the cascade correctly rejects
+every evaluation at `bias:htf_structure_unavailable`.
+
+**4. A real emission rate, which is still unknown.** Even running correctly with history and
+a calendar, how often this system emits has never been measured on real data — the only
+measurement is a synthetic year that emitted nothing, for reasons that are the generator's
+(see the funnel under *Known limitations*). Every alert will carry `[PAPER]` until the
+acceptance criteria in `docs/04` §8 pass, and they cannot be evaluated without purchased
+history. **Expect long silences by design, and do not read silence as "it is working".**
+`/status` reports the feed age, the evaluation count and the rejection breakdown, which is
+how you tell a working-but-quiet system from a stalled one.
+
+---
+
 ## Design commitments
 
 These are properties of the architecture, not aspirations:

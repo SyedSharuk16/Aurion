@@ -43,6 +43,11 @@ from aurion.data.types import Heartbeat, M1Candle, Quote
 
 _log = logging.getLogger(__name__)
 
+#: Slice width for a backfill. Bounded memory and resumable progress, not a tunable:
+#: `docs/01-architecture.md` §8 budgets the box at 1-2 GB and a whole warm-up window of
+#: M1 does not fit in one in-memory page list.
+COLD_START_SLICE_DAYS = 7
+
 
 @dataclass(slots=True)
 class IngestStats:
@@ -319,9 +324,40 @@ class IngestSupervisor:
         now = self._clock.now()
         for instrument in self.instruments:
             last = await self._store.last_m1_open(instrument)
-            start = last + timedelta(minutes=1) if last else now - timedelta(days=1)
-            if start < now:
-                await self.backfill(instrument, start, now)
+            if last is not None:
+                # Reconnect: fetch the gap and nothing more.
+                await self._backfill_sliced(instrument, last + timedelta(minutes=1), now)
+                continue
+            # Cold database. One day of history was the old behaviour here and it was
+            # silently fatal: the W1 bias gate needs two confirmed weekly swings per side,
+            # so with a day of bars the cascade rejects EVERY evaluation at
+            # `bias:htf_structure_unavailable` -- not for a while, but for as long as the
+            # process runs, with no error anywhere. A first start needs the warm-up window,
+            # which is the same window the VPS is sized to retain.
+            start = now - timedelta(days=self._cfg.data.m1_retention_days)
+            _log.info(
+                "cold start: backfilling %s days of M1 for %s in %s-day slices",
+                self._cfg.data.m1_retention_days,
+                instrument,
+                COLD_START_SLICE_DAYS,
+            )
+            await self._backfill_sliced(instrument, start, now)
+
+    async def _backfill_sliced(self, instrument: str, start: datetime, end: datetime) -> int:
+        """Backfill in slices, persisting each before fetching the next.
+
+        `fetch_candles` paginates but accumulates every page in memory before returning, and
+        the warm-up window is ~259k M1 candles per instrument. On the 1-2 GB target box that
+        is the difference between a working cold start and an OOM kill. Slicing also means an
+        interrupted backfill resumes from the stored cursor instead of starting over.
+        """
+        total = 0
+        cursor = start
+        while cursor < end:
+            slice_end = min(cursor + timedelta(days=COLD_START_SLICE_DAYS), end)
+            total += await self.backfill(instrument, cursor, slice_end)
+            cursor = slice_end
+        return total
 
     # -- health ------------------------------------------------------------
     def staleness(self, instrument: str, now: datetime) -> float | None:

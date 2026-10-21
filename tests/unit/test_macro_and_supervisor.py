@@ -15,7 +15,7 @@ from aurion.data.adapters.base import AdapterError
 from aurion.data.macro import FredProvider, MacroCache, MacroObs, StaticMacroProvider
 from aurion.data.repository import InMemoryBarRepository
 from aurion.data.store import Store
-from aurion.data.supervisor import IngestSupervisor
+from aurion.data.supervisor import COLD_START_SLICE_DAYS, IngestSupervisor
 from tests.conftest import make_m1
 
 T0 = datetime(2024, 6, 12, 9, 0, tzinfo=UTC)
@@ -191,6 +191,51 @@ async def test_backfill_sets_the_cursor(rig):
     assert n == 40
     cursor = await store.get_cursor("EURUSD")
     assert cursor is not None and cursor.last_bar_open_time is not None
+
+
+async def test_a_cold_start_backfills_the_warmup_window_not_one_day(cfg):
+    """One day of history is silently fatal, not merely thin.
+
+    The W1 bias gate needs two confirmed weekly swings per side, so with a day of bars the
+    cascade rejects every evaluation at `bias:htf_structure_unavailable` for as long as the
+    process runs, with no error anywhere. This asserts the requested range, which is what
+    the old behaviour got wrong.
+    """
+    store = Store("sqlite+aiosqlite:///:memory:")
+    await store.create_all()
+    try:
+        now = datetime(2024, 6, 12, 12, 0, tzinfo=UTC)
+        adapter = FakeAdapter([])
+        sup = IngestSupervisor(
+            cfg, adapter, store, InMemoryBarRepository(), EventBus(), clock=SimClock(now)
+        )
+        await sup._backfill_all_to_now()
+
+        assert adapter.fetches, "a cold start must fetch something"
+        requested_from = min(start for start, _ in adapter.fetches)
+        span_days = (now - requested_from).days
+        assert span_days == cfg.data.m1_retention_days, span_days
+        # And in slices, because a whole warm-up window of M1 does not fit in memory on the
+        # box this is sized for.
+        # The final slice is short -- 180 days does not divide into 7 -- so the bound is
+        # on the maximum, which is what caps peak memory.
+        widths = {(end - start).days for start, end in adapter.fetches}
+        assert max(widths) == COLD_START_SLICE_DAYS and min(widths) > 0, widths
+        assert len(adapter.fetches) >= cfg.data.m1_retention_days // COLD_START_SLICE_DAYS
+    finally:
+        await store.dispose()
+
+
+async def test_a_reconnect_backfills_only_the_gap(rig):
+    """The cold-start window must not be applied to a reconnect."""
+    sup, _store, _, adapter, _, candles = rig
+    await sup.ingest(candles[:20])
+    adapter.fetches.clear()
+    await sup._backfill_all_to_now()
+
+    assert adapter.fetches, "a reconnect must still fetch the gap"
+    earliest = min(start for start, _ in adapter.fetches)
+    assert earliest >= candles[19].open_time, "refetched further back than the gap"
 
 
 async def test_gap_repair_rebuilds_the_invalidated_resampled_bars(rig):

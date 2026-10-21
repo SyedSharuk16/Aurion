@@ -22,7 +22,7 @@
 
 meta:
   config_version: 1
-  mode: paper                      # paper | live_alerts | backtest  (overridden by AURION_MODE)
+  mode: paper                      # paper | live_alerts | backtest  [fixed here, not an env var]
 
 # ---------------------------------------------------------------------------
 # Instruments
