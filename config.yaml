@@ -1,0 +1,335 @@
+# Aurion configuration — Phase 1 proposal, pending review.
+#
+# Every numeric value carries a provenance tag:
+#   [fixed]   structural; not a free parameter
+#   [prior]   chosen from first principles or neutrality; FROZEN before optimisation
+#   [tunable] exposed to walk-forward optimisation; range declared; counts toward the
+#             multiple-testing correction (docs/04-validation-protocol.md §6)
+#
+# Tunable budget: 8 (validation.max_tunable_params). The natural candidate set is 10;
+# this file ships the Q13 recommendation PRE-APPLIED (sweep_max_bars and the OTE band
+# frozen as [prior]), leaving exactly 8 tunable. swing_N_scale is marked
+# [tunable, OPTIONAL] and is DISABLED by default — enabling it requires freezing another.
+# Confirm or override in docs/06-open-questions.md Q13.
+#
+# Secrets live only in .env. Nothing secret may appear in this file.
+
+meta:
+  config_version: 1
+  mode: paper                      # paper | live_alerts | backtest  (overridden by AURION_MODE)
+
+# ---------------------------------------------------------------------------
+# Instruments
+# ---------------------------------------------------------------------------
+instruments:
+  XAUUSD:
+    enabled: true
+    priority: 1
+    point: 0.01                    # [fixed]
+    contract_size: 100             # [fixed] troy ounces per standard lot
+    quote_ccy: USD
+    base_ccy: XAU
+    sessions: [london_kz, ny_am_kz, ny_am_gold, silver_bullet_b]
+  EURUSD:
+    enabled: true
+    point: 0.00001                 # [fixed] 5-digit
+    contract_size: 100000          # [fixed]
+    quote_ccy: USD
+    base_ccy: EUR
+    sessions: [london_kz, ny_am_kz]
+  GBPUSD:
+    enabled: true
+    point: 0.00001
+    contract_size: 100000
+    quote_ccy: USD
+    base_ccy: GBP
+    sessions: [london_kz, ny_am_kz]
+  USDJPY:
+    enabled: true
+    point: 0.001                   # [fixed] 3-digit
+    contract_size: 100000
+    quote_ccy: JPY
+    base_ccy: USD
+    sessions: [asian, london_kz, ny_am_kz]
+  AUDUSD:
+    enabled: true
+    point: 0.00001
+    contract_size: 100000
+    quote_ccy: USD
+    base_ccy: AUD
+    sessions: [london_kz, ny_am_kz]
+  USDCAD:
+    enabled: true
+    point: 0.00001
+    contract_size: 100000
+    quote_ccy: CAD
+    base_ccy: USD
+    sessions: [london_kz, ny_am_kz]
+
+usdx_proxy:
+  enabled: true                    # context only; NOT the exposure gate (definitions §1.2)
+  weights:                         # [prior] ICE weights renormalised over available pairs
+    EURUSD: 0.576
+    USDJPY: 0.136
+    GBPUSD: 0.119
+    USDCAD: 0.091
+  epoch: first_backtest_bar        # [prior]
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  base_timeframe: M1               # [fixed]
+  timeframes: [M5, M15, H1, H4, D1, W1]
+  price_source: BA                 # [fixed] bid+ask; never mid-only (definitions §0.3)
+  m1_retention_days: 180           # [prior] live VPS rolling window (architecture §8)
+  min_constituents_frac: 0.5       # [prior] below this a resampled bar is 'incomplete'
+  archive:
+    enabled: true
+    format: parquet
+    path: ./data/archive
+  anchors:
+    M5:  "00:00 UTC"               # [fixed]
+    M15: "00:00 UTC"               # [fixed]
+    H1:  "00:00 UTC"               # [fixed]
+    H4:  "17:00 America/New_York"  # [prior] contested; see Q2. Robustness: 18:00 NY, 00:00 UTC
+    D1:  "17:00 America/New_York"  # [prior] broker FX day
+    W1:  "Sun 17:00 America/New_York"  # [prior]
+  prev_period_day_convention: ny_midnight   # [prior] ny_midnight | broker  (Q3)
+
+adapter:
+  primary: oanda
+  stream_idle_timeout_s: 15        # [prior]
+  reconnect_backoff_s: [1, 2, 4, 8, 16, 32, 60]   # [prior] + jitter
+  backfill_overlap_bars: 1         # [fixed] seam continuity assertion
+
+# ---------------------------------------------------------------------------
+# Sessions and gates
+# ---------------------------------------------------------------------------
+sessions:
+  default_tz: America/New_York     # [prior] (Q1)
+  windows:
+    asian:            { start: "20:00", end: "00:00", emits_signals: false, tz: America/New_York }
+    london_kz:        { start: "02:00", end: "05:00", emits_signals: true,  tz: America/New_York }
+    ny_am_kz:         { start: "07:00", end: "10:00", emits_signals: true,  tz: America/New_York }
+    ny_am_gold:       { start: "08:30", end: "11:00", emits_signals: true,  tz: America/New_York }
+    london_close:     { start: "10:00", end: "12:00", emits_signals: false, tz: America/New_York }  # dropped pending a definition (Q14)
+    silver_bullet_a:  { start: "03:00", end: "04:00", emits_signals: true,  tz: America/New_York }
+    silver_bullet_b:  { start: "10:00", end: "11:00", emits_signals: true,  tz: America/New_York }
+    silver_bullet_c:  { start: "14:00", end: "15:00", emits_signals: true,  tz: America/New_York }
+
+blocks:
+  friday_cutoff: "12:00"           # [prior] no new signals after this, NY
+  friday_force_close: "16:00"      # [prior] force-expire open signals, NY
+  rollover: { start: "16:55", end: "17:10" }        # [prior]
+  weekend_gap_block_minutes: 60    # [prior]
+  weekend_gap_atr_mult: 0.5        # [prior] larger gap extends the block to one H1 close
+
+spread:
+  max_median_mult: 2.5             # [tunable] range [1.5, 5.0]
+  bucket_minutes: 15               # [prior] time-of-day conditioning (definitions §3.4)
+  bucket_window_obs: 20            # [prior]
+  weekday_classes: [[mon], [tue, wed, thu], [fri]]   # [prior]
+  fail_closed_on_warmup: true      # [fixed]
+
+news:
+  provider_env: AURION_CALENDAR_PROVIDER
+  blocked_impacts: [high]          # [prior]
+  blackout_minutes: 30             # [prior] each side
+  event_overrides:                 # [prior]
+    NFP:  60
+    CPI:  60
+    FOMC: 60
+  fail_safe: block                 # [fixed] per brief; see the liveness hazard, definitions §3.5
+  point_in_time_required: false    # if false, the report header states it (Q5)
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+analysis:
+  atr_period: 14                   # [fixed] Wilder
+
+  structure:
+    swing_half_width: { M5: 2, M15: 2, H1: 3, H4: 3, D1: 3, W1: 2 }   # [prior]
+    swing_N_scale: 1               # [tunable, OPTIONAL] {1, 2} — omitted from the budget by default
+    displacement_k: 1.0            # [tunable] range [0.5, 2.5]
+    require_fvg_for_displacement: true    # [fixed] per brief
+    mss_sweep_window_bars: 10      # [prior]
+
+  ict:
+    fvg_min_atr: 0.10              # [tunable] range [0.0, 0.5]
+    fvg_mitigation_threshold: 1.0  # [fixed] fill fraction
+    ob_lookback_bars: 10           # [prior]
+    ob_extent: wick                # [prior] wick | body
+    breaker_window_bars: 20        # [prior]
+    enable_mitigation_blocks: true # (Q6) dropped if the ablation cannot separate it from OB
+    bpr_window_bars: 10            # [prior]
+
+  liquidity:
+    pool_tolerance_atr: 0.15       # [tunable] range [0.05, 0.5]
+    pool_lookback_bars: 100        # [prior]
+    sweep_min_penetration_atr: 0.05  # [tunable] range [0.0, 0.3]
+    sweep_reclaim_buffer_atr: 0.0  # [prior]
+    sweep_max_bars: 3              # [prior] frozen per Q13 recommendation (was tunable [1,10])
+
+  pd_range:
+    ote_lo: 0.62                   # [prior] frozen per Q13 (robustness variant instead)
+    ote_hi: 0.79                   # [prior]
+    max_dist_atr: 2.0              # [prior] HTF array must be within this of price
+
+  sr:
+    method: kde                    # [prior] kde | dbscan
+    kde_bandwidth_atr: 0.25        # [tunable] range [0.1, 0.6]
+    dbscan_eps_atr: 0.25           # [prior] only when method=dbscan
+    lookback_bars: 500             # [prior]
+    recency_halflife_bars: 250     # [prior]
+    touch_tolerance_atr: 0.15      # [prior]
+    touch_min_separation_bars: 5   # [prior]
+    merge_distance_atr: 0.3        # [prior]
+    rejection_weight_clamp: [0.25, 4.0]   # [prior]
+    enable_classic_pivots: true
+    enable_camarilla: true         # constants NEVER tuned (definitions §7.5)
+    round_numbers:
+      XAUUSD: [10, 50, 100]        # [fixed]
+      fx_5digit: [0.0050, 0.0100]  # [fixed]
+      fx_jpy: [0.50, 1.00]         # [fixed]
+
+  quarterly:
+    enabled: true
+    weekly_partition: mon_thu      # [prior] mon_thu | sun_start        (Q4)
+    monthly_partition: seven_day_blocks   # [prior] seven_day_blocks | calendar_weeks  (Q4)
+    true_month_open_rule: first_monday_1800_ny   # [prior] (Q4)
+    rel_range_lookback: 20         # [prior] K same-level quarters
+    amdx:
+      alpha_range: 0.8             # [prior] NOT tunable — defines what the words mean
+      beta_efficiency: 0.35        # [prior]
+      gamma_efficiency: 0.6        # [prior]
+      zeta_sweep_depth_atr: 0.5    # [prior]
+    bias_as_gate: false            # [fixed] qt_align is a FEATURE, not a gate (definitions §8.6)
+
+  mmxm:
+    enabled: true
+    htf: H1                        # [prior]
+    ltf: M15                       # [prior]
+    consolidation_min_bars: 20     # [prior]
+    consolidation_max_range_atr: 2.0  # [prior]
+    engineering_min_legs: 2        # [prior]
+    premium_discount_min: 0.6      # [prior]
+    min_stage_for_signal: 3        # [prior]
+    stage_weights: [0.15, 0.20, 0.25, 0.30, 0.10]   # [prior] NOT separately fitted
+
+  regime:
+    atr_percentile_window: 500     # [prior]
+    rv_window_bars: 20             # [prior]
+    rv_timeframes: [M15, H1]       # [fixed] never M1 (bid-ask bounce, definitions §10.1)
+    gk_parkinson_max_tf: H4        # [fixed] gap-sensitive estimators are intraday only
+    adx_period: 14                 # [fixed] Wilder
+    adx_hi: 25                     # [prior]
+    adx_lo: 20                     # [prior]
+    hurst_window: 512              # [prior] expected to be ablated out (Part C prediction)
+    variance_ratio_q: [2, 4, 8]    # [prior]
+    variance_ratio_window: 500     # [prior]
+    corr_halflife_h1_bars: 120     # [prior]
+    vwap_min_bars: 20              # [prior]
+    real_yield_source: none        # [prior] (Q7) — absent, not approximated
+
+exposure:
+  usd_beta_window_h1: 500          # [prior]
+  max_usd_risk_fraction: 1.5       # [prior] multiples of per-trade risk
+  block_gold_vs_usd_conflict: false  # [prior]
+
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+bias:
+  require_w1_d1_agreement: true    # [prior]
+
+entry:
+  models: [sweep_mss_retrace, silver_bullet_fvg]   # london_close model omitted (Q14)
+  fvg_level: ce                    # [prior] edge | ce
+  require_ote: false               # [prior] feature, not gate, until measured
+  mss_window_bars: 10              # [prior]
+
+signal:
+  rr_min: 2.0                      # [prior] per brief
+  expected_r_min: 0.15             # [tunable] range [0.0, 0.5]
+  p_floor: 0.25                    # [prior]
+  sl_buffer_atr: 0.25              # [tunable] range [0.1, 1.0]
+  sl_min_atr: 0.3                  # [prior] guards fictitious R multiples
+  tp_min_level_strength: 0.4       # [prior]
+  max_pending_bars: 12             # [prior] M15 bars
+  expiry_grace_minutes: 0          # [prior]
+  cooldown_bars_after_sl: 0        # [prior] off; measured rather than assumed
+  one_active_per_instrument: true  # [fixed]
+
+lifecycle:
+  assume_be_after_tp1: true        # [prior] (Q9) — both variants reported
+  tp_allocation: [0.5, 0.3, 0.2]   # [prior] (Q9)
+  intrabar_tie_break: sl_first     # [fixed] conservative; reported share is a headline metric
+
+sizing:
+  account_ccy: USD                 # (Q8)
+  account_size: 10000              # (Q8)
+  risk_pct: 0.5                    # (Q8)
+  lot_step: 0.01
+  min_lot: 0.01
+  round_down_only: true            # [fixed] never round up past the risk limit
+
+model:
+  primary: logistic_l2
+  cross_check: gbm
+  calibration: isotonic
+  min_events_per_feature: 20       # [fixed] sample-size discipline (docs/03 §3.2)
+  train_on: candidates             # [fixed] not emitted signals only
+  sample_uniqueness_weighting: true  # [fixed]
+
+# ---------------------------------------------------------------------------
+# Notification
+# ---------------------------------------------------------------------------
+notify:
+  send_charts: true
+  chart_timeout_s: 10              # [prior] text is sent without the chart on timeout
+  chart_timeframes: [entry, entry_up1]
+  global_rate_per_s: 20            # [prior] below Telegram's documented 30/s
+  per_chat_rate_per_min: 15        # [prior] below the documented ~20/min per group
+  retry_backoff_s: [1, 2, 4, 8, 16]  # [prior]
+  timezones: [America/New_York, Asia/Singapore]   # [fixed] per brief
+  paper_tag: "[PAPER]"
+
+health:
+  max_bar_staleness_s: 120         # [prior] per brief (2 min)
+  calendar_outage_realert_min: 30  # [prior]
+  heartbeat_time: "17:30"          # [prior] NY
+  heartbeat_tz: America/New_York
+
+runtime:
+  evaluate_on_forming_bar: false   # [fixed] bar-close-driven only
+  thread_pool_workers: 1           # [prior] bounds memory on 1 vCPU
+  log_format: json
+  log_rotate_mb: 50
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+validation:
+  max_tunable_params: 8            # [fixed] architectural overfitting cap
+  holdout_months: 12               # [fixed] untouched until the final test
+  wf_train_months: 24              # [prior]
+  wf_validate_months: 3            # [prior]
+  wf_test_months: 3                # [prior]
+  wf_step_months: 3                # [prior]
+  embargo: max_label_horizon_plus_1_bar   # [fixed]
+  min_holdout_trades: 200          # [fixed] below this the holdout is 'inconclusive'
+  min_cell_trades: 30              # [fixed] breakout cells below this show counts only
+  bootstrap_paths: 10000           # [prior]
+  block_bootstrap_expected_len: 10 # [prior] trades
+  ablation_correction: holm        # [fixed]
+  dsr_trial_count_source: trial_ledger   # [fixed] counted, not estimated
+
+costs:
+  spread_model: historical         # [prior] fixed | historical | modelled
+  slippage_atr_m1: 0.10            # [prior] stops and market force-closes only
+  limit_fill_margin_points: 1.0    # [prior] must trade THROUGH the level
+  commission_per_lot_per_side: 0.0 # [prior]
+  news_spread_mult: { XAUUSD: 4.0, default: 2.0 }   # [prior] to be replaced by measurement
+  news_spread_tau_min: 5           # [prior]

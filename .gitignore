@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state / data
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+data/archive/
+data/cache/
+logs/
+artifacts/
+reports/out/
+
+# Vendor market data must not be redistributed (see docs/06-open-questions.md Q11)
+tests/fixtures/real/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
