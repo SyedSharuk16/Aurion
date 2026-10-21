@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Lint
+        run: python -m ruff check aurion tests tools
+      - name: Types
+        run: python -m mypy aurion tools
+      - name: Causality tests
+        # Run these first and separately: a failure means results cannot be trusted.
+        run: python -m pytest tests/causality -v
+      - name: Tests with coverage
+        run: python -m pytest tests -q --cov=aurion --cov-report=term-missing
+      - name: Power tables are reproducible
+        run: python tools/power.py > /dev/null

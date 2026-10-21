@@ -12,7 +12,8 @@ no broker order endpoint is referenced anywhere in the design.
 |---|---|---|
 | 1 | Architecture, exact definitions, config surface, validation protocol, open questions | **Approved** |
 | 1.5 | Power, trial capacity, the module cut, pilot specification (`docs/07`, `tools/power.py`) | **Delivered — review required** |
-| 2 | Data adapters (OANDA v20 first), resampler, session engine, macro daily series, schema, tests | Next |
+| 2 | Data adapters (OANDA v20 first), resampler, session engine, schema, tests | **Delivered** |
+| 2b | Macro daily series adapter (FRED), backfill supervisor, reconnect/gap repair | Next |
 | 2E | **Power pilot** (`docs/07` §5) — XAUUSD only, gates data purchase and trial budget | Exit gate on Phase 2 + 3a |
 | 3 | Analysis modules: `structure`, `ict`, `sr`, `regime` (Tier 1) and `quarterly`, `mmxm` (Tier 2, observational) + tests | Blocked |
 | 4 | Event-driven backtester, purged walk-forward, ablation, validation report | Blocked |
@@ -44,6 +45,35 @@ before the tag is removed.
 | `config.yaml` | Every threshold in the system, each tagged `fixed` / `prior` / `derived` |
 
 ---
+
+## Running it (Phase 2)
+
+```bash
+make install     # editable install with dev extras
+make causality   # the four causality tests -- run these first
+make all         # lint + types + coverage + causality
+make power       # regenerate every table in docs/07
+```
+
+Current state: 153 tests, 92% branch coverage, `ruff` clean, `mypy --strict` clean.
+`analysis/primitives.py` is at 96%, above the 80% gate in `docs/04` §8.
+
+What exists and is tested:
+
+| Component | Notes |
+|---|---|
+| `core/timeframe.py` | DST-correct bucketing. Boundaries are generated in the anchor's local time, so H4/D1/W1 produce exactly one irregular bar per DST transition (3h/5h on H4, 23h/25h on D1) and they are flagged, not normalised |
+| `core/marketview.py` | The causality boundary. No accessor returns anything later than `as_of`; forming-bar access needs an explicit opt-in |
+| `core/clock.py` | `SimClock` refuses to move backwards -- a backwards step is how replay reveals future data |
+| `data/resample.py` | Incremental, O(1) per candle. Emits only at close, flags thin buckets, never emits empty ones |
+| `data/store.py` | SQLAlchemy 2.x async, idempotent upserts, gap detection, retention pruning, trial ledger |
+| `data/adapters/oanda.py` | Read-only, `price=BA`, drops incomplete candles, refuses any granularity above M1 |
+| `sessions/` | Window algebra with per-window timezones, bucketed spread filter, point-in-time calendar, gates G1-G7 |
+| `tests/causality/` | T1 prefix invariance (on the gate decision), T2 future nulling, T3 time-translation equivariance, T4 resample boundary |
+
+The adapter protocol has **no order-submission method**, and a test asserts it
+(`test_adapter_protocol_has_no_order_methods`). Adding execution would require widening the
+protocol, which is a visible diff.
 
 ## Design commitments
 

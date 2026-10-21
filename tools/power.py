@@ -215,7 +215,9 @@ def fold_overlap_inflation(n_folds: int, train_months: int, step_months: int) ->
     return 1.0 + 2.0 * acc
 
 
-def n_folds_available(dev_months: int, train_months: int, test_months: int, step_months: int) -> int:
+def n_folds_available(
+    dev_months: int, train_months: int, test_months: int, step_months: int
+) -> int:
     span = dev_months - train_months - test_months
     return 0 if span < 0 else span // step_months + 1
 
@@ -331,10 +333,11 @@ def table_effective_n(
                 f" {infl:>9.2f} | {n_eff:>5.0f} | {rel_events:>11.2f}x"
             )
     best = max(rows, key=lambda r: r[6])
+    baseline = next(r for r in rows if r[0] == 24 and r[1] == 3)
     out += [
         "",
         f"  Highest N_eff: train={best[0]}m, step={best[1]}m -> N_eff {best[6]:.0f}"
-        f" (vs {[r for r in rows if r[0] == 24 and r[1] == 3][0][6]:.0f} at train=24m/step=3m)",
+        f" (vs {baseline[6]:.0f} at train=24m/step=3m)",
         "",
         "  Two things this shows that the original design got wrong:",
         "   1. A SHORTER training window raises N_eff twice over - more folds (so more OOS",
@@ -359,7 +362,9 @@ def table_effective_n(
 # --------------------------------------------------------------------------
 # Tables
 # --------------------------------------------------------------------------
-def table_mde(sigma_r: float, sigma_d: float, affected_fracs: tuple[float, ...], n_tests: int) -> str:
+def table_mde(
+    sigma_r: float, sigma_d: float, affected_fracs: tuple[float, ...], n_tests: int
+) -> str:
     out = [
         f"MDE on expectancy (R per trade), alpha=0.05 two-sided, power=0.80, "
         f"family correction over {n_tests} tests",
@@ -485,9 +490,13 @@ def table_capacity(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--sigma-r", type=float, default=1.4, help="per-trade R dispersion")
-    p.add_argument("--sigma-d", type=float, default=1.5, help="paired diff dispersion on affected subset")
+    p.add_argument(
+        "--sigma-d", type=float, default=1.5, help="paired diff sd on the affected subset"
+    )
     p.add_argument("--n-tests", type=int, default=6, help="size of the ablation family")
     p.add_argument("--instruments", type=int, default=6)
     p.add_argument("--years", type=float, default=5.0)

@@ -1,0 +1,383 @@
+"""SQLAlchemy models and the durable store. `docs/05-data-contracts.md` §3.
+
+Design points worth stating, because each prevents a specific failure:
+
+* **No SQLite-only types and no raw SQL outside migrations**, so the Postgres path is a URL
+  change rather than a rewrite.
+* **Incomplete candles are never stored.** Storing one and correcting it later is exactly
+  the repaint the design forbids; the adapter drops them on ingest.
+* **``confirmed_at`` is a column on every derived table**, and every read filters on it.
+  There is no index path that returns an unconfirmed object.
+* **Prices are rounded to the instrument's point before persistence** (§0.7) so replay is
+  bit-identical.
+* Analysis does not read from here. The live runtime keeps a bounded in-memory hot window
+  (`InMemoryBarRepository`) that this store rehydrates on restart; making the repository
+  async would push ``await`` through every analysis function to no benefit.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from datetime import datetime, timedelta
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    UniqueConstraint,
+    delete,
+    select,
+)
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from aurion.core.timeframe import UTC, TimeFrame
+from aurion.data.types import OHLC, Bar, M1Candle
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def _utc_col(**kw: object) -> Mapped[datetime]:
+    return mapped_column(DateTime(timezone=True), **kw)  # type: ignore[arg-type]
+
+
+class InstrumentRow(Base):
+    __tablename__ = "instruments"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    point: Mapped[float] = mapped_column(Float)
+    contract_size: Mapped[float] = mapped_column(Float)
+    base_ccy: Mapped[str] = mapped_column(String(8))
+    quote_ccy: Mapped[str] = mapped_column(String(8))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class M1Row(Base):
+    __tablename__ = "candles_m1"
+
+    instrument: Mapped[str] = mapped_column(String(16), primary_key=True)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    close_time: Mapped[datetime] = _utc_col()
+    bid_o: Mapped[float] = mapped_column(Float)
+    bid_h: Mapped[float] = mapped_column(Float)
+    bid_l: Mapped[float] = mapped_column(Float)
+    bid_c: Mapped[float] = mapped_column(Float)
+    ask_o: Mapped[float] = mapped_column(Float)
+    ask_h: Mapped[float] = mapped_column(Float)
+    ask_l: Mapped[float] = mapped_column(Float)
+    ask_c: Mapped[float] = mapped_column(Float)
+    tick_volume: Mapped[int] = mapped_column(Integer)
+    source_adapter: Mapped[str] = mapped_column(String(32))
+
+
+class BarRow(Base):
+    """Resampled cache. Recomputable from candles_m1, and recomputed on restart."""
+
+    __tablename__ = "candles_tf"
+
+    instrument: Mapped[str] = mapped_column(String(16), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(4), primary_key=True)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    close_time: Mapped[datetime] = _utc_col()
+    o: Mapped[float] = mapped_column(Float)
+    h: Mapped[float] = mapped_column(Float)
+    l: Mapped[float] = mapped_column(Float)  # noqa: E741
+    c: Mapped[float] = mapped_column(Float)
+    tick_volume: Mapped[int] = mapped_column(Integer)
+    constituents: Mapped[int] = mapped_column(Integer)
+    incomplete: Mapped[bool] = mapped_column(Boolean, default=False)
+    dst_irregular: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class NewsEventRow(Base):
+    __tablename__ = "news_events"
+    __table_args__ = (UniqueConstraint("event_id", "revision"),)
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scheduled_utc: Mapped[datetime] = _utc_col()
+    currency: Mapped[str] = mapped_column(String(8))
+    title: Mapped[str] = mapped_column(String(256))
+    impact: Mapped[str] = mapped_column(String(8))
+    published_utc: Mapped[datetime] = _utc_col()
+    provider: Mapped[str] = mapped_column(String(32))
+
+
+class MacroObsRow(Base):
+    """Daily macro conditioners (§10.3a).
+
+    ``published_at`` is what makes the point-in-time view a query rather than a
+    reconstruction: a Tuesday signal must not read Tuesday's yield close before it existed.
+    """
+
+    __tablename__ = "macro_obs"
+
+    series_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    observation_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0)
+    value: Mapped[float] = mapped_column(Float)
+    published_at: Mapped[datetime] = _utc_col()
+
+
+class AdapterCursorRow(Base):
+    __tablename__ = "adapter_cursors"
+
+    instrument: Mapped[str] = mapped_column(String(16), primary_key=True)
+    adapter: Mapped[str] = mapped_column(String(32))
+    last_bar_open_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_stream_heartbeat: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class KVRow(Base):
+    __tablename__ = "kv_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_json: Mapped[str] = mapped_column(String(4096))
+
+
+class RunRow(Base):
+    """The trial ledger (`docs/04` §6.1).
+
+    Every backtest run writes a row, including throwaway exploratory ones, because the
+    trial count used in the deflated Sharpe is *counted* from this table rather than
+    estimated from a declared grid. A declared grid always undercounts: the real search
+    includes every abandoned idea.
+    """
+
+    __tablename__ = "runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    git_sha: Mapped[str] = mapped_column(String(64))
+    data_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    data_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = _utc_col()
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    headline_metrics_json: Mapped[str] = mapped_column(String(8192), default="{}")
+    selection_branch: Mapped[str] = mapped_column(String(32), default="pending_pilot")
+
+
+def _round(value: float, point: float) -> float:
+    return round(value / point) * point
+
+
+class Store:
+    """Async persistence facade."""
+
+    __slots__ = ("_adapter_name", "_engine", "_session")
+
+    def __init__(self, url: str, adapter_name: str = "oanda", echo: bool = False) -> None:
+        self._engine: AsyncEngine = create_async_engine(url, echo=echo, future=True)
+        self._session = async_sessionmaker(self._engine, expire_on_commit=False)
+        self._adapter_name = adapter_name
+
+    async def create_all(self) -> None:
+        async with self._engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def dispose(self) -> None:
+        await self._engine.dispose()
+
+    def session(self) -> AsyncSession:
+        return self._session()
+
+    # -- M1 ----------------------------------------------------------------
+    async def upsert_m1(self, candles: Iterable[M1Candle], point: float) -> int:
+        """Insert M1 candles, skipping any already present. Idempotent by design.
+
+        Backfill overlaps by one bar at every seam, so duplicates are expected rather than
+        exceptional; they are skipped instead of raising.
+        """
+        rows = 0
+        async with self._session() as s, s.begin():
+            for c in candles:
+                exists = await s.get(M1Row, (c.instrument, c.open_time))
+                if exists is not None:
+                    continue
+                s.add(
+                    M1Row(
+                        instrument=c.instrument,
+                        open_time=c.open_time,
+                        close_time=c.close_time,
+                        bid_o=_round(c.bid.o, point),
+                        bid_h=_round(c.bid.h, point),
+                        bid_l=_round(c.bid.l, point),
+                        bid_c=_round(c.bid.c, point),
+                        ask_o=_round(c.ask.o, point),
+                        ask_h=_round(c.ask.h, point),
+                        ask_l=_round(c.ask.l, point),
+                        ask_c=_round(c.ask.c, point),
+                        tick_volume=c.tick_volume,
+                        source_adapter=self._adapter_name,
+                    )
+                )
+                rows += 1
+        return rows
+
+    async def load_m1(
+        self, instrument: str, start: datetime | None = None, limit: int | None = None
+    ) -> list[M1Candle]:
+        stmt = select(M1Row).where(M1Row.instrument == instrument)
+        if start is not None:
+            stmt = stmt.where(M1Row.open_time >= start)
+        stmt = stmt.order_by(M1Row.open_time)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        async with self._session() as s:
+            result = await s.execute(stmt)
+            return [
+                M1Candle(
+                    instrument=r.instrument,
+                    open_time=r.open_time.replace(tzinfo=UTC),
+                    close_time=r.close_time.replace(tzinfo=UTC),
+                    bid=OHLC(r.bid_o, r.bid_h, r.bid_l, r.bid_c),
+                    ask=OHLC(r.ask_o, r.ask_h, r.ask_l, r.ask_c),
+                    tick_volume=r.tick_volume,
+                )
+                for r in result.scalars()
+            ]
+
+    async def last_m1_open(self, instrument: str) -> datetime | None:
+        async with self._session() as s:
+            result = await s.execute(
+                select(M1Row.open_time)
+                .where(M1Row.instrument == instrument)
+                .order_by(M1Row.open_time.desc())
+                .limit(1)
+            )
+            got = result.scalar_one_or_none()
+            return got.replace(tzinfo=UTC) if got is not None else None
+
+    async def m1_gaps(
+        self, instrument: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        """Missing minute ranges between stored candles.
+
+        Market closures appear as gaps too, which is correct: the caller decides whether a
+        gap is a closure or a feed failure, and backfill is cheap and idempotent either way.
+        """
+        candles = await self.load_m1(instrument, start)
+        gaps: list[tuple[datetime, datetime]] = []
+        prev: datetime | None = None
+        for c in candles:
+            if c.open_time > end:
+                break
+            if prev is not None and c.open_time > prev + timedelta(minutes=1):
+                gaps.append((prev + timedelta(minutes=1), c.open_time))
+            prev = c.open_time
+        return gaps
+
+    async def prune_m1(self, instrument: str, before: datetime) -> int:
+        """Rolling-window retention for the live VPS (`docs/01-architecture.md` §8)."""
+        async with self._session() as s, s.begin():
+            result = await s.execute(
+                delete(M1Row).where(M1Row.instrument == instrument, M1Row.open_time < before)
+            )
+            # execute() of a DELETE returns a CursorResult, which carries rowcount.
+            return int(getattr(result, "rowcount", 0) or 0)
+
+    # -- resampled ---------------------------------------------------------
+    async def upsert_bars(self, bars: Iterable[Bar], point: float) -> int:
+        rows = 0
+        async with self._session() as s, s.begin():
+            for b in bars:
+                key = (b.instrument, str(b.timeframe), b.open_time)
+                if await s.get(BarRow, key) is not None:
+                    continue
+                s.add(
+                    BarRow(
+                        instrument=b.instrument,
+                        timeframe=str(b.timeframe),
+                        open_time=b.open_time,
+                        close_time=b.close_time,
+                        o=_round(b.ohlc.o, point),
+                        h=_round(b.ohlc.h, point),
+                        l=_round(b.ohlc.l, point),
+                        c=_round(b.ohlc.c, point),
+                        tick_volume=b.tick_volume,
+                        constituents=b.constituents,
+                        incomplete=b.incomplete,
+                        dst_irregular=b.dst_irregular,
+                    )
+                )
+                rows += 1
+        return rows
+
+    async def load_bars(
+        self, instrument: str, timeframe: TimeFrame, limit: int | None = None
+    ) -> list[Bar]:
+        stmt = (
+            select(BarRow)
+            .where(BarRow.instrument == instrument, BarRow.timeframe == str(timeframe))
+            .order_by(BarRow.open_time.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        async with self._session() as s:
+            result = await s.execute(stmt)
+            rows = list(result.scalars())
+        rows.reverse()
+        return [
+            Bar(
+                instrument=r.instrument,
+                timeframe=TimeFrame(r.timeframe),
+                open_time=r.open_time.replace(tzinfo=UTC),
+                close_time=r.close_time.replace(tzinfo=UTC),
+                ohlc=OHLC(r.o, r.h, r.l, r.c),
+                tick_volume=r.tick_volume,
+                constituents=r.constituents,
+                incomplete=r.incomplete,
+                dst_irregular=r.dst_irregular,
+            )
+            for r in rows
+        ]
+
+    # -- cursors -----------------------------------------------------------
+    async def set_cursor(
+        self,
+        instrument: str,
+        last_bar_open_time: datetime | None = None,
+        last_stream_heartbeat: datetime | None = None,
+    ) -> None:
+        async with self._session() as s, s.begin():
+            row = await s.get(AdapterCursorRow, instrument)
+            if row is None:
+                row = AdapterCursorRow(instrument=instrument, adapter=self._adapter_name)
+                s.add(row)
+            if last_bar_open_time is not None:
+                row.last_bar_open_time = last_bar_open_time
+            if last_stream_heartbeat is not None:
+                row.last_stream_heartbeat = last_stream_heartbeat
+
+    async def get_cursor(self, instrument: str) -> AdapterCursorRow | None:
+        async with self._session() as s:
+            return await s.get(AdapterCursorRow, instrument)
+
+    # -- trial ledger ------------------------------------------------------
+    async def record_run(self, run: RunRow) -> None:
+        async with self._session() as s, s.begin():
+            s.add(run)
+
+    async def count_trials(self, kinds: Sequence[str] = ("backtest", "ablation")) -> int:
+        """Counted, never estimated. Feeds `N_raw` in the deflated Sharpe."""
+        async with self._session() as s:
+            result = await s.execute(select(RunRow).where(RunRow.kind.in_(kinds)))
+            return len(list(result.scalars()))
