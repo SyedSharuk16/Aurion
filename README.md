@@ -132,7 +132,7 @@ git clone -b claude/beautiful-fermi-lzdkb1 https://github.com/SyedSharuk16/Aurio
 cd Aurion
 python3 -m venv .venv                   # required: see below
 . .venv/bin/activate                    # Windows cmd: .venv\Scripts\activate
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"       # `python -m pip`, not bare `pip`
 cp .env.example .env                    # Windows cmd: copy .env.example .env
 python scripts/setup.py                 # verifies the chain, sends you one real message
 ```
@@ -142,6 +142,13 @@ Python as externally managed (PEP 668), so a bare `pip install` is refused with
 `error: externally-managed-environment` — on essentially every current VPS image. Use the
 venv; do not pass `--break-system-packages`, which is what the error message tempts you
 into and which lets pip overwrite packages `apt` owns. `make install` creates it for you.
+
+**Use `python -m pip`, not bare `pip`.** If the same PEP 668 error appears *after* the venv
+is activated, the `pip` on PATH is not the venv's: `python3 -m venv` leaves a venv without
+pip when Debian's `python3-venv` package is absent, so bare `pip` falls through to
+`/usr/bin/pip`, which is externally managed. `python -m pip` always uses the interpreter
+you are in. Recover with `python -m ensurepip --upgrade`, or
+`sudo apt install python3-venv` and recreate the venv.
 
 Python **3.11+** is required (`StrEnum` and `datetime.UTC`); `setup.py` checks the version
 first so an older interpreter reports that rather than failing on an unrelated import.
